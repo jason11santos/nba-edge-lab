@@ -809,7 +809,7 @@ def cloud_pass():
     maybe_retrain(st)
     wk = datetime.now().strftime("%G-W%V")
     sp = study_params()
-    stale = early_coefs() is None or "move_model" not in sp or "totals" not in sp
+    stale = early_coefs() is None or any(k not in sp for k in ("move_model", "totals", "rest", "refs"))
     if stale or (st.meta("study_week") != wk and datetime.now().weekday() == 0):
         from . import openline
         try:
