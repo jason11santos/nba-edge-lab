@@ -65,7 +65,11 @@ def fill(st: Store, ol_db: str | None = None, budget: int = 5000, threads: int =
                                [(r.game_id, nm, i) for i, nm in enumerate(refs)])
             npl = 0
             if r.date > HIST_PLAYERS_END and r.game_id not in have_pl:
-                pl = pd.DataFrame(espn.box_rows(js))
+                try:
+                    pl = pd.DataFrame(espn.box_rows(js))
+                except (KeyError, TypeError, ValueError) as e:  # odd box score (All-Star game, missing athlete)
+                    _log("box score skipped", r.game_id, repr(e))
+                    pl = pd.DataFrame()
                 if len(pl):
                     pl["player_id"] = "espn:" + pl["espn_id"].astype(str)
                     pl["game_id"], pl["date"] = r.game_id, r.date

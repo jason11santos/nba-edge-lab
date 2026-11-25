@@ -186,6 +186,8 @@ def box_rows(js):
         st = t["statistics"][0]
         keys = st["keys"]
         for a in st["athletes"]:
+            if not (a.get("athlete") or {}).get("id"):
+                continue
             s = dict(zip(keys, a.get("stats") or []))
             pair = lambda k: [(_num(v) or 0.0) for v in (s.get(k) or "0-0").split("-")[:2]]  # noqa: E731
             fgm, fga = pair("fieldGoalsMade-fieldGoalsAttempted")
