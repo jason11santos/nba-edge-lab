@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+data/
+state/
+out/
+web/live.json
+web/live.json.tmp
+web/openline.json
+web/paper_bets.csv
+web/project.json

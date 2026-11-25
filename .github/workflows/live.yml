@@ -1,0 +1,77 @@
+# Runs the live system on GitHub's servers every 5 minutes: collect lines + injuries, paper-bet, settle,
+# retrain nightly, rerun the opening-line study weekly. State lives on the "data" branch (one commit,
+# overwritten each run) so the repo does not grow. The dashboard reads data/live.json from that branch.
+name: live
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      NBA_EDGE_SKIP_NBAAPI: "1"          # stats.nba.com blocks cloud servers; ESPN box scores are used instead
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install packages
+        run: pip install -r requirements.txt
+
+      - name: Restore historical tables
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw
+            data/games.parquet
+            data/player_games.parquet
+          key: history-v1
+
+      - name: Build historical tables (first run only)
+        run: test -f data/games.parquet || python -m nba_edge setup
+
+      - name: Restore state from the data branch
+        run: |
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            mkdir -p state && git archive FETCH_HEAD | tar -x -C state
+            for f in live.sqlite live_model.pkl openline.sqlite; do [ -f state/$f ] && cp state/$f data/; done
+            for f in openline.json; do [ -f state/$f ] && cp state/$f web/; done
+            echo "state restored"; ls -la state
+          else
+            echo "no data branch yet: first run will bootstrap (about 20-40 minutes)"
+          fi
+
+      - name: Live pass
+        run: python -m nba_edge cloud
+
+      - name: Save state to the data branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out
+          for f in data/live.sqlite data/live_model.pkl data/openline.sqlite web/live.json web/openline.json web/paper_bets.csv; do
+            [ -f "$f" ] && cp "$f" out/
+          done
+          [ -z "$(ls -A out)" ] && { echo "nothing to save"; exit 0; }
+          cd out
+          git init -q -b data
+          git add -A
+          git -c user.name="nba-edge-bot" -c user.email="nba-edge-bot@users.noreply.github.com" commit -qm "state $(date -u +%FT%TZ)"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
