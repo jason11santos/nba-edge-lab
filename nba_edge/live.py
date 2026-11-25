@@ -243,16 +243,39 @@ def tonight_lineups(state: F.PlayerState, team: str, inj: pd.DataFrame, day=None
     return f, listed
 
 
+# Only state-regulated US sportsbooks count for line shopping. Offshore books (MyBookie, LowVig, BetOnline, Bovada,
+# BetUS) often post stale prices that look like free money; the first live run "found" 5-10% edges there.
+REGULATED_BOOKS = {"espn", "DraftKings", "FanDuel", "BetMGM", "Caesars", "BetRivers", "ESPN BET", "Fanatics",
+                   "Hard Rock Bet", "BallyBet", "betPARX", "theScore Bet"}
+MAX_BOOK_GAP = 0.025  # a book more than 2.5 pts of win probability away from the other books' median is treated as stale
+
+
+def _strip(mh, ma):
+    ih, ia = implied(mh), implied(ma)
+    return ih / (ih + ia)
+
+
 def latest_books(st: Store, game_id):
-    """The current line at every source: ESPN (DraftKings) always; Odds API books only if fetched in the last 3 hours.
-    Snapshots are only stored when a line changes, so the newest row per source IS the current line."""
+    """The current line at every regulated source: ESPN (DraftKings) always; Odds API books only if fetched in the
+    last 3 hours. Snapshots are only stored when a line changes, so the newest row per source IS the current line.
+    Books whose price is far from the consensus are dropped as stale."""
     o = st.q("select * from odds where game_id=? and kind='live'", (game_id,))
     if o.empty:
         return o
     o = o.sort_values("ts").drop_duplicates("source", keep="last")
     last_api = st.meta("oddsapi_last")
     fresh_api = bool(last_api) and (datetime.now(timezone.utc) - datetime.fromisoformat(last_api)).total_seconds() < 3 * 3600
-    return o[(o["source"] == "espn") | fresh_api]
+    o = o[((o["source"] == "espn") | fresh_api) & o["source"].isin(REGULATED_BOOKS)]
+    if len(o) >= 3:
+        ok = o["ml_home"].notna() & o["ml_away"].notna()
+        p = pd.Series(np.nan, index=o.index)
+        p[ok] = _strip(o.loc[ok, "ml_home"].astype(float), o.loc[ok, "ml_away"].astype(float))
+        if ok.sum() >= 3:
+            o = o[~ok | ((p - p[ok].median()).abs() <= MAX_BOOK_GAP)]
+        tot = o["total"].astype(float)
+        if tot.notna().sum() >= 3:
+            o = o[tot.isna() | ((tot - tot.median()).abs() <= 2.0)]
+    return o
 
 
 def best_prices(st: Store, game_id):
@@ -716,6 +739,11 @@ def cloud_pass():
         st.meta("backfilled", now())
     else:
         backfill(st, start=(date.today() - timedelta(days=3)).isoformat())
+    if not st.meta("cleanup_offshore_v1"):  # bets placed at offshore/stale prices before the regulated-books filter
+        books = ",".join(f"'{b}'" for b in REGULATED_BOOKS)
+        n = st.con.execute(f"delete from paper_bets where won is null and book not in ({books})").rowcount
+        st.meta("cleanup_offshore_v1", f"removed {n}")
+        log("removed", n, "bets placed at offshore books")
     if not st.meta("cleanup_totals_v1"):  # bets placed by the first totals rule, before the adverse-move fix
         n = st.con.execute("delete from paper_bets where rule in ('tot3','tot5') and won is null").rowcount
         st.meta("cleanup_totals_v1", f"removed {n}")
