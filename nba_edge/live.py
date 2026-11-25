@@ -806,7 +806,7 @@ def cloud_pass():
             dts = gh.loc[gh["date"] < pd.Timestamp(summaries.OFFICIALS_FROM), "date"].dt.strftime("%Y-%m-%d")
             summaries.linescore_history(st, dts[dts >= "2010-10-01"].tolist())
             st.meta("linescores_hist", now())
-                today_g = st.q("select game_id, espn_id, state from games where date in (?, ?)",
+        today_g = st.q("select game_id, espn_id, state from games where date in (?, ?)",
                        (date.today().isoformat(), (date.today() + timedelta(days=1)).isoformat()))
         log("referee crews posted for", summaries.today(st, today_g), "of", len(today_g), "upcoming games")
         if st.meta("probe_day") != date.today().isoformat() and len(today_g):
