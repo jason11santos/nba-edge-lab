@@ -27,6 +27,8 @@ create table if not exists paper_bets (rule text, game_id text, ts text, side te
   p_model real, p_fair_at_bet real, ev real, stake real, p_fair_close real, clv real, won int, pnl real,
   primary key (rule, game_id));
 create table if not exists meta (key text primary key, value text);
+create table if not exists officials (game_id text, ref text, ord int, primary key (game_id, ref));
+create table if not exists summaries (game_id text primary key, ts text, n_refs int, n_players int);
 """
 
 

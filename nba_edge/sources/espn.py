@@ -160,9 +160,26 @@ def injuries():
     return rows
 
 
+def summary(espn_id: str):
+    return _get(f"{SITE}/summary", {"event": espn_id})
+
+
+def officials(js) -> list[str]:
+    """Referee crew names from a game summary (empty until ESPN posts them)."""
+    out = []
+    for o in ((js.get("gameInfo") or {}).get("officials") or []):
+        nm = o.get("displayName") or o.get("fullName")
+        if nm:
+            out.append(nm.strip())
+    return out
+
+
 def box_score(espn_id: str):
     """Player lines for one finished game, in the same shape as the historical box scores."""
-    js = _get(f"{SITE}/summary", {"event": espn_id})
+    return box_rows(summary(espn_id))
+
+
+def box_rows(js):
     rows = []
     for t in (js.get("boxscore") or {}).get("players", []):
         team = _code(t["team"]["abbreviation"])

@@ -145,7 +145,7 @@ def assemble(st: Store):
     pl = st.q("select * from player_games")
     pl["date"] = pd.to_datetime(pl["date"])
     pl["played"] = pl["played"].astype(bool)
-    pl = pl[pl["date"] > pd.Timestamp("2024-07-01")]
+    pl = pl[pl["date"] > pg_hist["date"].max()]
     # map ESPN ids onto NBA ids by name where the same player exists in history
     names = pg_hist.drop_duplicates("player_id", keep="last").set_index("player")["player_id"]
     norm = lambda s: s.str.lower().str.replace(r"[^a-z ]", "", regex=True).str.replace(r"\s+(jr|sr|ii|iii|iv)$", "", regex=True).str.strip()  # noqa: E731
@@ -722,6 +722,9 @@ def maybe_retrain(st: Store, hour=4):
     last = st.meta("last_retrain_day") or ""
     mdl = _load_model()
     outdated = mdl is None or "totals" not in mdl   # a model saved by older code is missing newer parts
+    if st.meta("retrain_needed") == "1":            # new player data arrived (the 2024-26 box-score fill)
+        st.meta("retrain_needed", "0")
+        outdated = True
     if outdated or (now_pt.hour >= hour and last != now_pt.date().isoformat()):
         sync_players(st, seasons=(teams.season_of(now_pt),))
         retrain(st)
@@ -748,6 +751,16 @@ def cloud_pass():
         n = st.con.execute("delete from paper_bets where rule in ('tot3','tot5') and won is null").rowcount
         st.meta("cleanup_totals_v1", f"removed {n}")
         log("removed", n, "totals bets placed before the adverse-move fix")
+    from . import openline, summaries
+    try:  # box scores for the 2024-26 gap + every game's referee crew (one ESPN request per game, once)
+        if summaries.fill(st, openline.DB) and not st.meta("summaries_filled"):
+            st.meta("summaries_filled", now())
+            st.meta("retrain_needed", "1")
+        today_g = st.q("select game_id, espn_id, state from games where date in (?, ?)",
+                       (date.today().isoformat(), (date.today() + timedelta(days=1)).isoformat()))
+        log("referee crews posted for", summaries.today(st, today_g), "of", len(today_g), "upcoming games")
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
     maybe_retrain(st)
     wk = datetime.now().strftime("%G-W%V")
     sp = study_params()
