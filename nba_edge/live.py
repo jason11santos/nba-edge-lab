@@ -392,7 +392,9 @@ def _total_picks(tot_pred, tot_sd, last, bt, shrink_t):
             why = "no opening total"
         elif sgn * (tot_pred - t_open) < R["edge"]:
             why = f"model {tot_pred:.1f} vs opening {t_open:g}: under {R['edge']:g} pts"
-        elif sgn * (t_now - t_open) > MAX_TOTAL_ADVERSE:
+        elif sgn * (t_open - t_now) > MAX_TOTAL_ADVERSE:
+            # The market moving the total away from our side (down for an over, up for an under) is information,
+            # even though it makes our price look better. Same rule as the moneyline (see the PHX @ HOU card).
             why = f"total moved {abs(t_now - t_open):g} pts against this side"
         elif abs(t_now - t_open) > MAX_TOTAL_MOVE:
             why = "total already moved from the open"
@@ -714,6 +716,10 @@ def cloud_pass():
         st.meta("backfilled", now())
     else:
         backfill(st, start=(date.today() - timedelta(days=3)).isoformat())
+    if not st.meta("cleanup_totals_v1"):  # bets placed by the first totals rule, before the adverse-move fix
+        n = st.con.execute("delete from paper_bets where rule in ('tot3','tot5') and won is null").rowcount
+        st.meta("cleanup_totals_v1", f"removed {n}")
+        log("removed", n, "totals bets placed before the adverse-move fix")
     maybe_retrain(st)
     wk = datetime.now().strftime("%G-W%V")
     sp = study_params()
