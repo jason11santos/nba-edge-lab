@@ -172,7 +172,7 @@ def load_lines():
         best_a_close=("ml_away_close", lambda s: s.iloc[np.argmax(decimal_odds(s))]),
         n_books=("book", "nunique"))
     d = g.merge(ref[["game_id", "book", "ml_home_open", "ml_away_open", "ml_home_close", "ml_away_close",
-                     "p_open", "p_close"] + TOTAL_COLS], on="game_id").merge(best, on="game_id")
+                     "p_open", "p_close", "spread_close"] + TOTAL_COLS], on="game_id").merge(best, on="game_id")
     d["date"] = pd.to_datetime(d["date"])
     d["y"] = (d["home_pts"] > d["away_pts"]).astype(float)
     return d.sort_values(["date", "game_id"]).reset_index(drop=True), ln
@@ -309,14 +309,19 @@ MOVE_FEATS = ["dis", "lo", "lo2", "b2b_home", "b2b_away", "rest_diff", "travel_k
               "d_miss_min", "star_out_home", "star_out_away", "tot_dis"]
 
 
-def move_design(df: pd.DataFrame) -> pd.DataFrame:
+REST_FEATS = ["rest_risk_home", "rest_risk_away", "d_rest_risk", "d_exp_vs_heur"]
+
+
+def move_design(df: pd.DataFrame, feats=None) -> pd.DataFrame:
     """Features known when the line opens, for predicting how far it moves by tip-off (in log-odds)."""
+    feats = feats or MOVE_FEATS
     lo = F.logit(df["p_open"].to_numpy(float))
     D = pd.DataFrame({"dis": F.logit(df["p_stats"].to_numpy(float)) - lo, "lo": lo, "lo2": lo ** 2}, index=df.index)
-    for c in MOVE_FEATS[3:-1]:
-        D[c] = df[c].to_numpy(float) if c in df else np.nan
+    for c in feats:
+        if c not in D and c != "tot_dis":
+            D[c] = df[c].to_numpy(float) if c in df else np.nan
     D["tot_dis"] = (df["total_pred"] - df["tot_open"]).to_numpy(float) / 10 if "tot_open" in df else np.nan
-    return D[MOVE_FEATS]
+    return D[feats]
 
 
 def ridge_fit(D: pd.DataFrame, y, lam=20.0):
@@ -336,10 +341,10 @@ def ridge_predict(m, D: pd.DataFrame):
     return m["beta"][0] + Z @ np.array(m["beta"][1:])
 
 
-def move_study(d: pd.DataFrame, nights_all, slope, warmup=400, refit_days=30):
+def move_study(d: pd.DataFrame, nights_all, slope, warmup=400, refit_days=30, feats=None):
     """Walk-forward: predict logit(close) - logit(open), then bet only where the predicted move toward one side is
     bigger than half the bookmaker's margin. Pre-set margins: 0, 0.5 and 1 point of probability."""
-    D = move_design(d)
+    D = move_design(d, feats)
     mv = F.logit(d["p_close"].to_numpy(float)) - F.logit(d["p_open"].to_numpy(float))
     pred = np.full(len(d), np.nan)
     m, last = None, None
@@ -425,6 +430,22 @@ def study():
     L = prenews_lineups(X, pg)
     for c in L.columns:
         X[c] = L[c].to_numpy()
+    print("star-rest predictor: replaying every game since 2010 (a couple of minutes)…", flush=True)
+    from . import availability as A
+    rows, tg, _ = A.replay(X, pg)
+    pav = A.walk_forward(rows)
+    G = A.game_features(A.expected(rows, tg, pav))
+    rest_eval = A.evaluate(rows, pav, since=str(d["date"].min().date()))
+    X = X.merge(G, on="game_id", how="left")
+    if os.environ.get("NBA_EDGE_EXPECTED_LINEUPS"):  # experiment: stats model sees p_avail-weighted lineups
+        for sd in ("home", "away"):
+            ok = X[f"exp_gmsc_{sd}"].notna()
+            X.loc[ok, f"str_gmsc_{sd}"] = X.loc[ok, f"exp_gmsc_{sd}"]
+            X.loc[ok, f"str_pm_{sd}"] = X.loc[ok, f"exp_pm_{sd}"]
+            X.loc[ok, f"loss_gmsc_{sd}"] = X.loc[ok, f"exp_loss_{sd}"]
+        X["d_str_gmsc"] = X["str_gmsc_home"] - X["str_gmsc_away"]
+        X["d_str_pm"] = X["str_pm_home"] - X["str_pm_away"]
+        X["d_loss_gmsc"] = X["loss_gmsc_home"] - X["loss_gmsc_away"]
     X = X[X["game_id"].isin(set(d["game_id"])) | (X["date"] < d["date"].min())]
     test_dates = set(d["date"])
     print("refitting stats-only learners month by month…", flush=True)
@@ -471,12 +492,24 @@ def study():
     res["by_season"] = by
     print("line-move model and totals…", flush=True)
     feats = ["game_id", "b2b_home", "b2b_away", "rest_diff", "travel_km_away", "season_frac", "d_miss_min",
-             "star_out_home", "star_out_away"]
+             "star_out_home", "star_out_away"] + REST_FEATS
     from . import totals as TT
     TP, tm = TT.walk_forward(X, test_from="2010-10-01")
     d = d.merge(X[feats], on="game_id", how="left").merge(TP[["game_id", "total_pred"]], on="game_id", how="left")
-    res["move_model"], res["move"] = move_study(d, nights_all=d["date"].dt.strftime("%Y-%m-%d").to_numpy(),
-                                                slope=res["line_move"]["slope"])
+    nights_d = d["date"].dt.strftime("%Y-%m-%d").to_numpy()
+    base_m, base_r = move_study(d, nights_all=nights_d, slope=res["line_move"]["slope"])
+    rest_m, rest_r = move_study(d, nights_all=nights_d, slope=res["line_move"]["slope"], feats=MOVE_FEATS + REST_FEATS)
+    better = rest_r["r2_vs_no_move"] > base_r["r2_vs_no_move"] + 0.002
+    res["move_model"], res["move"] = (rest_m, rest_r) if better else (base_m, base_r)
+    res["rest"] = {**rest_eval, "move_r2_without": base_r["r2_vs_no_move"], "move_r2_with": rest_r["r2_vs_no_move"],
+                   "move_corr_without": base_r["corr"], "move_corr_with": rest_r["corr"],
+                   "bets_without": base_r["bets"], "bets_with": rest_r["bets"], "used_live": bool(better)}
+    try:
+        from . import refs
+        off = live._store().q("select game_id, ref from officials")
+        res["refs"] = refs.study(d, off, _boot, _ols_cluster)
+    except Exception as e:  # noqa: BLE001
+        res["refs"] = {"error": repr(e)}
     res["totals"] = totals_open_study(d)
     tc, _ = TT.backtest_vs_close(X)
     res["totals"]["vs_close"] = {k: v for k, v in tc.items() if k != "weights_last"}

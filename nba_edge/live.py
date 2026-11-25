@@ -181,12 +181,31 @@ def retrain(st: Store, prm: M.Params | None = None):
     y_tot = (X["home_pts"] + X["away_pts"]).to_numpy(float)
     keep = (X["date"] >= "2008-08-01").to_numpy()
     tm = TT.TotalsModel().fit(TT.design(X)[keep], y_tot[keep], X.loc[keep, "date"], pd.Timestamp(date.today()))
+    rest = {}
+    try:  # star-rest predictor: chance each rotation player sits, before the injury report (shown on game cards)
+        from . import availability as A
+        horizon = pd.Timestamp(date.today() + timedelta(days=2))
+        rows, tg, pst = A.replay(X[X["date"] <= horizon], pg)
+        rm = A.fit_final(rows)
+        up = rows[(rows["date"] >= pd.Timestamp(date.today() - timedelta(days=1))) & (rows["base"] >= A.MIN_BASE)].copy()
+        if len(up):
+            up["p_sit"] = 1 - rm.predict_proba(up[A.FEATS])[:, 1]
+            for (gid, team), q in up.groupby(["game_id", "team"]):
+                q = q.assign(risk=q["p_sit"] * q["star"].clip(lower=0.5)).sort_values("risk", ascending=False)
+                rest.setdefault(gid, {})[team] = [
+                    {"player": pst.name.get(p_, str(p_)), "p_sit": round(float(ps), 3), "minutes": round(float(b), 1),
+                     "b2b": bool(bb), "played_last": bool(pl_)}
+                    for p_, ps, b, bb, pl_ in q[["player_id", "p_sit", "base", "b2b", "played_last"]].head(5).itertuples(index=False)]
+        log("rest predictor: fitted on", int(rows["y"].notna().sum()), "player-games;", len(rest), "upcoming games")
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
     old = _load_model()
     hedge = old["hedge"] if old else M.Hedge(M.Params().use, M.Params().hedge_eta, M.Params().hedge_decay)
     if old is None:
         hedge = _warm_hedge(X, hedge)
     with open(MODEL_PATH, "wb") as f:
-        pickle.dump({"fc": fc, "hedge": hedge, "state": state, "totals": tm, "trained": now(), "n_train": len(T)}, f)
+        pickle.dump({"fc": fc, "hedge": hedge, "state": state, "totals": tm, "rest": rest, "trained": now(),
+                     "n_train": len(T)}, f)
     st.meta("last_retrain", now())
     log("retrained on", len(T), "games; weights", hedge.state())
 
@@ -542,11 +561,37 @@ def predict_day(st: Store, day: date, mdl, g):
             "b2b": [_f(r["b2b_home"]), _f(r["b2b_away"])], "travel_km_away": _f(r["travel_km_away"]),
             "lineup_loss": [_f(Xt.loc[i, "loss_gmsc_home"]), _f(Xt.loc[i, "loss_gmsc_away"])],
             "injuries": {"home": sides[gid][0][:6], "away": sides[gid][1][:6]},
+            "rest_watch": _rest_watch(mdl, gid, r["home"], r["away"], sides[gid]),
+            "refs": _crew(st, gid),
             "picks": picks, "locked": locked.replace({np.nan: None}).to_dict("records"),
             "pick": next((x for x in picks if x["rule"] == "ens2"), None),
         })
     st.con.commit()
     return games
+
+
+def _rest_watch(mdl, gid, home, away, sides):
+    """Players the rest predictor thinks might sit, minus anyone already on the injury report."""
+    rw = (mdl.get("rest") or {}).get(gid) or {}
+    out = {}
+    for k, (team, listed) in enumerate(((home, sides[0]), (away, sides[1]))):
+        names = {_norm(x["player"]) for x in listed}
+        out["home" if k == 0 else "away"] = [x for x in rw.get(team, []) if _norm(x["player"]) not in names][:3]
+    return out
+
+
+def _crew(st: Store, gid):
+    """Tonight's referees (once posted) and their tendencies from the weekly study: points vs the closing total and
+    home margin vs the closing spread, per game, shrunk. The study found these do not predict results reliably yet."""
+    crew = st.q("select ref from officials where game_id=? order by ord", (gid,))["ref"].tolist()
+    if not crew:
+        return None
+    eff = ((study_params().get("refs") or {}).get("effects") or {})
+    known = [eff[x] for x in crew if x in eff]
+    return {"crew": crew,
+            "tot": round(float(np.mean([e[0] for e in known])), 2) if known else None,
+            "home": round(float(np.mean([e[1] for e in known])), 2) if known else None,
+            "games": int(min(e[2] for e in known)) if known else 0}
 
 
 def predict_today(st: Store, day: date | None = None, days_ahead: int = 1):
@@ -721,7 +766,7 @@ def maybe_retrain(st: Store, hour=4):
     now_pt = datetime.now(ZoneInfo("America/Los_Angeles"))
     last = st.meta("last_retrain_day") or ""
     mdl = _load_model()
-    outdated = mdl is None or "totals" not in mdl   # a model saved by older code is missing newer parts
+    outdated = mdl is None or "totals" not in mdl or "rest" not in mdl   # saved by older code: missing newer parts
     if st.meta("retrain_needed") == "1":            # new player data arrived (the 2024-26 box-score fill)
         st.meta("retrain_needed", "0")
         outdated = True

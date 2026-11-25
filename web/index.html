@@ -356,7 +356,7 @@ function renderOpenline(O) {
     <div class="panel" style="grid-column:1/-1"><div class="chart-title">Every rule tested</div><div class="chart-sub">Return per $1 with 95% intervals that resample game nights. 16 rules were tried, so expect at least one to look good by luck. "Best book" prices come almost entirely from 2023-24, the only season with many books.</div>
      <div class="tbl-wrap"><table class="t"><thead><tr><th>Where / rule</th><th class="n">Bets</th><th class="n">Return</th><th class="n">95% CI</th><th class="n">CLV, pts</th><th class="n">Beat close</th></tr></thead><tbody>${rowsT}</tbody></table></div></div>
    </div>
-   ${moveHTML(O)}${totalsHTML(O)}
+   ${moveHTML(O)}${totalsHTML(O)}${restHTML(O)}${refsHTML(O)}
    <p class="small" style="margin-top:12px">Caveat: any independent forecast shows some line movement toward it when opening prices are noisy. What counts is closing-line value larger than the bookmaker's cut, which so far holds only for the larger disagreements, on small samples. The live paper record above is the forward test.</p>`;
 }
 
@@ -376,6 +376,29 @@ function totalsHTML(O) {
   return `<div class="panel" style="margin-top:16px"><div class="chart-title">Totals (over/under) at the open</div>
    <div class="chart-sub">${t.n_games.toLocaleString()} games. Average miss: opening total ${t.mae_open.toFixed(2)} pts, closing total ${t.mae_close.toFixed(2)}, model ${t.mae_model.toFixed(2)}. The total moves toward the model ${lm.toward_model_share == null ? '—' : pct(lm.toward_model_share, 0)} of the time when they differ by 3+ points (slope ${lm.slope?.toFixed(2)}, p ${lm.p_value < 0.001 ? '< 0.001' : '= ' + lm.p_value?.toFixed(3)}). Break-even at −110 is ${pct(t.breakeven, 1)}.${vc.n_games ? ` Against closing totals since 2013 (${vc.n_games.toLocaleString()} games) the model misses by ${vc.mae_model.toFixed(2)} vs the line's ${vc.mae_line.toFixed(2)}: the close is hard to beat here too.` : ''}</div>
    <div class="tbl-wrap"><table class="t">${thead}<tbody>${betRows(t.bets, 'avg_clv_pts', (x) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2) + ' pts')}</tbody></table></div></div>`;
+}
+
+function restHTML(O) {
+  const r = O.rest; if (!r) return '';
+  const seg = (x) => x ? `${pct(x.actual_sit, 1)} actually sat, ${pct(x.predicted_sit, 1)} predicted (${x.n.toLocaleString()})` : '—';
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">Star-rest predictor: who sits before the injury report?</div>
+   <div class="chart-sub">LightGBM on every rotation player-game since 2010, refit each season on earlier seasons only: back-to-backs, minutes load, recent absences, a player's own rest history, years in the league, standings late in the season. Tested on ${r.n.toLocaleString()} player-games since the study start. Brier score ${r.brier.toFixed(3)} vs ${r.brier_old.toFixed(3)} for "whoever played last game plays tonight"${r.auc_who_sits ? `; it ranks who sits with AUC ${r.auc_who_sits.toFixed(2)}` : ''}.</div>
+   <div class="kv"><div>Played last game, all rotation players</div><div>${seg(r.played_last_sits)}</div><div>Stars</div><div>${seg(r.stars)}</div><div>Stars on the 2nd night of a back-to-back</div><div>${seg(r.stars_b2b)}</div>
+    <div>Line-move model, R² without → with</div><div>${(r.move_r2_without * 100).toFixed(1)}% → ${(r.move_r2_with * 100).toFixed(1)}%</div></div>
+   <p class="small">Verdict: accurate, but ${r.used_live ? 'it adds enough to the line-move model to be used live.' : 'it barely improves the line-move model, so the betting rules do not use it: books already price predictable rest when they open the line. It is shown on game cards as information.'}</p></div>`;
+}
+function refsHTML(O) {
+  const f = O.refs; if (!f || !f.n_games || f.error) return '';
+  const p = (x) => x.p_value < 0.001 ? '< 0.001' : '= ' + x.p_value.toFixed(2);
+  const tb = f.top_vs_bottom_fifth || {};
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">Referee crews</div>
+   <div class="chart-sub">${f.n_games.toLocaleString()} games and ${f.n_refs} officials since 2023-24. Each official's average result vs the closing line, using only earlier games and shrunk heavily toward zero; a crew is the average of its members. Crews are announced the morning of the game, after most opening lines.</div>
+   <div class="kv"><div>Crew effect vs final total beyond the closing line</div><div>slope ${f.vs_close.slope.toFixed(2)}, p ${p(f.vs_close)}</div>
+    <div>Total moves toward the crew, open → close</div><div>slope ${f.market_move.slope.toFixed(2)}, p ${p(f.market_move)}</div>
+    <div>Crew home effect vs home margin beyond the spread</div><div>slope ${f.home_margin.slope.toFixed(2)}, p ${p(f.home_margin)}</div>
+    <div>Highest-scoring fifth of crews vs lowest</div><div>over the close ${pct(tb.over_close_rate_top, 1)} vs ${pct(tb.over_close_rate_bottom, 1)}</div></div>
+   ${Object.keys(f.bets || {}).length ? `<div class="tbl-wrap"><table class="t">${thead}<tbody>${betRows(f.bets, 'x', () => '—')}</tbody></table></div>` : ''}
+   <p class="small">Verdict: no reliable referee effect yet: crews differ by under half a point once noise is removed, and nothing is statistically significant. Crews are collected every day, so this rerun each week will tell if one emerges.</p></div>`;
 }
 
 // ---------------- Tonight
@@ -416,6 +439,10 @@ function card(g) {
     (g.p_open != null ? `<div class="small">Opening fair price${g.line_move != null ? `, moved ${(g.line_move * 100).toFixed(1)} pts since` : ''}</div><div class="small">${pct(g.p_open)}</div>` : '');
   const inj = (side, team) => (g.injuries?.[side] || []).slice(0, 4).map((x) => `<li><span>${esc(team)} · ${esc(x.player)} <span class="small">${x.minutes ? x.minutes + ' min' : ''}</span></span><span class="st">${esc(x.status)} · ${pct(x.play_prob, 0)}</span></li>`).join('');
   const injHTML = inj('away', g.away) + inj('home', g.home);
+  const rw = (side, team) => (g.rest_watch?.[side] || []).filter((x) => x.p_sit >= 0.06).map((x) => `<li><span>${esc(team)} · ${esc(x.player)} <span class="small">${x.minutes} min${x.b2b ? ' · back-to-back' : ''}${x.played_last ? '' : ' · missed last game'}</span></span><span class="st">${pct(x.p_sit, 0)} to sit</span></li>`).join('');
+  const rwHTML = rw('away', g.away) + rw('home', g.home);
+  const rf = g.refs;
+  const refHTML = rf ? `<div class="small"><b>Referees:</b> ${rf.crew.map(esc).join(', ')}${rf.tot != null ? ` · crew history ${rf.tot >= 0 ? '+' : '−'}${Math.abs(rf.tot).toFixed(1)} pts vs closing totals, ${rf.home >= 0 ? '+' : '−'}${Math.abs(rf.home).toFixed(1)} home margin vs spread (not a proven edge)` : ''}</div>` : '<div class="small">Referees: not posted yet (usually announced the morning of the game).</div>';
   const RL = (L && L.rules) || {ens2:{label:'Ensemble at current line, EV > 2%'}};
   const locked = Object.fromEntries((g.locked || []).map((b) => [b.rule, b]));
   const picks = g.picks || (g.pick ? [{...g.pick, rule:'ens2', why:g.pick.bet ? null : 'EV under 2%'}] : []);
@@ -438,6 +465,8 @@ function card(g) {
     <div>Elo</div><div>${g.elo ? `${Math.round(g.elo[1])} / ${Math.round(g.elo[0])}` : '—'}</div><div>Rest, days</div><div>${g.rest ? `${g.rest[1]} / ${g.rest[0]}` : '—'}</div>
     <div>${esc(g.away)} travel</div><div>${g.travel_km_away != null ? Math.round(g.travel_km_away).toLocaleString() + ' km' : '—'}</div></div>
    ${injHTML ? `<div><div class="small" style="margin-bottom:4px">Injury report, rotation players, chance to play</div><ul class="inj">${injHTML}</ul></div>` : '<div class="small">No rotation players on the injury report.</div>'}
+   ${rwHTML ? `<div><div class="small" style="margin-bottom:4px">Rest predictor: not on the report, but might sit</div><ul class="inj">${rwHTML}</ul></div>` : ''}
+   ${refHTML}
    <div class="pick" style="display:grid;gap:4px">${pick}</div></article>`;
 }
 

@@ -85,6 +85,18 @@ thousands of bets to separate from luck; CLV settles within a few hundred.
 but the line moves toward the model (57% of big disagreements, p < 0.001). Bets at one book's opening price gain
 +2.0 points of CLV at EV > 2% and +3.7 at EV > 5%. The same model bet at the closing price loses ~9%.
 
+### Things tested that did not add an edge (Nov 2026)
+
+- **Star-rest predictor** (`nba_edge/availability.py`): LightGBM on every rotation player-game since 2010 predicts who
+  sits before the injury report. Accurate (Brier 0.072 vs 0.154 for "whoever played last game plays"), but it barely
+  improves the line-move model (R² 7.4% → 7.5%) or its CLV: books already price predictable rest at the open.
+  Shown on game cards as information; not used by the betting rules.
+- **Referee crews** (`nba_edge/refs.py`, crews from ESPN summaries and official.nba.com): 3,300 games since 2023-24.
+  Shrunk crew tendencies differ by under half a point; no significant link to totals beyond the close (p ≈ 0.5) or to
+  line moves (p ≈ 0.3); a weak hint on home margin (p ≈ 0.2). Collected daily and retested weekly.
+- **Heavy favorites / parlays** (closing lines, 2013–2026): every probability bucket loses 3–5%; parlays of 70%+
+  favorites lose 8% (2 legs) to 11% (4 legs) because the bookmaker's margin compounds per leg.
+
 ## Run it on your own computer
 
 ```

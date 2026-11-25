@@ -85,9 +85,57 @@ def fill(st: Store, ol_db: str | None = None, budget: int = 5000, threads: int =
     return n_ok
 
 
+def _nba_page():
+    """Today's crews from the NBA's referee-assignments page (posted ~9am Eastern). Returns a list of
+    (set of team codes in the row, [referee names]). Best effort: the page layout is not an API."""
+    import re
+
+    import requests
+
+    from . import teams
+    html = requests.get("https://official.nba.com/referee-assignments/", timeout=20,
+                        headers={"User-Agent": "Mozilla/5.0 (nba-edge-lab research project)"}).text
+    keys = {}
+    for code, (full, *_rest) in teams.TEAMS.items():
+        nick = full.split(" ", 2)[-1] if full.startswith(("Los Angeles", "Golden State", "New York", "New Orleans",
+                                                            "Oklahoma City", "San Antonio")) else full.split(" ", 1)[-1]
+        keys[code] = {full.lower(), nick.lower(), full.lower().replace(nick.lower(), "").strip()}
+    keys["LAL"] |= {"l.a. lakers", "la lakers"}
+    keys["LAC"] |= {"l.a. clippers", "la clippers"}
+    keys["LAL"].discard("los angeles")
+    keys["LAC"].discard("la")
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.S | re.I):
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.S | re.I)]
+        if len(cells) < 3 or "@" not in cells[0]:
+            continue
+        a, h = [x.strip().lower() for x in cells[0].split("@", 1)]
+        codes = {c for c, ks in keys.items() for side in (a, h) if side in ks}
+        refs = [re.sub(r"\s*\(#?\d+\)", "", c).strip() for c in cells[1:4]]
+        refs = [r for r in refs if r and not r.isdigit()]
+        if len(codes) == 2 and refs:
+            out.append((codes, refs))
+    return out
+
+
 def today(st: Store, games: pd.DataFrame):
     """Crews for upcoming games (state 'pre'), if ESPN has posted them. Stored like finished games' crews."""
     found = 0
+    page = None
+    try:
+        page = _nba_page()
+        _log("NBA referee page:", len(page), "games", page[:1])
+    except Exception as e:  # noqa: BLE001
+        _log("NBA referee page unavailable:", repr(e)[:120])
+    if page:
+        g2 = st.q("select game_id, home, away from games where game_id in (%s)" % ",".join("?" * len(games)),
+                  tuple(games["game_id"])) if len(games) else pd.DataFrame()
+        for r in g2.itertuples(index=False):
+            for codes, refs in page:
+                if codes == {r.home, r.away}:
+                    st.con.executemany("insert or replace into officials values (?,?,?)",
+                                       [(r.game_id, nm, i) for i, nm in enumerate(refs)])
     for r in games.itertuples(index=False):
         if getattr(r, "state", "pre") != "pre" or not getattr(r, "espn_id", None):
             continue

@@ -168,3 +168,27 @@ def test_odds_api_budget():
     recent = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     assert oddsapi.due(recent) is False          # never twice inside 2 hours
     assert 7 * 2 * 31 <= 500                     # 7 calls a day x 2 credits fits the free plan
+
+
+def test_referee_crew_features_use_only_earlier_games():
+    import pandas as pd
+    from nba_edge import refs
+    g = pd.DataFrame({"game_id": ["a", "b", "c"], "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+                      "home_pts": [130, 120, 100], "away_pts": [120, 110, 95], "tot_close": [220, 220, 220],
+                      "spread_close": [0, 0, 0]})
+    off = pd.DataFrame({"game_id": ["a", "b", "c"], "ref": ["X", "X", "Y"]})
+    f, table = refs.crew_features(g, off)
+    f = f.set_index("game_id")
+    assert f.loc["a", "crew_tot"] == 0            # nothing known before his first game
+    assert f.loc["b", "crew_tot"] == 30 / (1 + refs.K_TOT)   # one game, 30 over, shrunk hard
+    assert f.loc["c", "crew_tot"] == 0            # a different official
+    assert table.set_index("ref").loc["X", "games"] == 2
+
+
+def test_nba_referee_page_parser(monkeypatch):
+    import requests
+    from nba_edge import summaries
+    html = ('<table><tr><th>Game</th><th>Crew Chief</th></tr><tr><td>LA Clippers @ Memphis</td><td>Scott Foster (#48)'
+            '</td><td>Ben Taylor (#46)</td><td>Jenna Reneau (#93)</td></tr></table>')
+    monkeypatch.setattr(requests, "get", lambda *a, **k: type("R", (), {"text": html})())
+    assert summaries._nba_page() == [({"LAC", "MEM"}, ["Scott Foster", "Ben Taylor", "Jenna Reneau"])]

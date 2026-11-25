@@ -201,3 +201,25 @@ def game_features(E: pd.DataFrame) -> pd.DataFrame:
     G["d_rest_risk"] = G["rest_risk_home"] - G["rest_risk_away"]
     G["d_exp_vs_heur"] = (G["exp_gmsc_home"] - G["heur_gmsc_home"]) - (G["exp_gmsc_away"] - G["heur_gmsc_away"])
     return G.reset_index().rename(columns={"index": "game_id"})
+
+
+def evaluate(rows: pd.DataFrame, p_avail, since: str):
+    """How well the predictor ranks who sits, on rotation players since `since`, vs the old assumption."""
+    m = (rows["date"] >= since).to_numpy() & rows["y"].notna().to_numpy() & (rows["base"].to_numpy() >= MIN_BASE)
+    y = rows.loc[m, "y"].to_numpy(float)
+    p = np.clip(np.asarray(p_avail)[m], 1e-4, 1 - 1e-4)
+    last = rows.loc[m, "played_last"].to_numpy(float)
+    old = np.clip(last, 0.03, 0.97)
+    pl = last == 1
+    star = rows.loc[m, "star"].to_numpy(float)
+    b2b = rows.loc[m, "b2b"].to_numpy(float) == 1
+    top = star >= np.quantile(star[pl], 0.85) if pl.any() else star > 0
+    seg = lambda k: {"n": int(k.sum()), "actual_sit": float(1 - y[k].mean()), "predicted_sit": float(1 - p[k].mean())}  # noqa: E731
+    out = {"n": int(m.sum()), "brier": float(np.mean((p - y) ** 2)), "brier_old": float(np.mean((old - y) ** 2)),
+           "played_last_sits": seg(pl), "stars": seg(pl & top), "stars_b2b": seg(pl & top & b2b)}
+    try:
+        from sklearn.metrics import roc_auc_score
+        out["auc_who_sits"] = float(roc_auc_score(1 - y[pl], 1 - p[pl]))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
