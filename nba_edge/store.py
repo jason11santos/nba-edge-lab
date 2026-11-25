@@ -29,6 +29,7 @@ create table if not exists paper_bets (rule text, game_id text, ts text, side te
 create table if not exists meta (key text primary key, value text);
 create table if not exists officials (game_id text, ref text, ord int, primary key (game_id, ref));
 create table if not exists summaries (game_id text primary key, ts text, n_refs int, n_players int);
+create table if not exists linescores (game_id text, team text, period int, pts real, primary key (game_id, team, period));
 """
 
 
@@ -37,7 +38,9 @@ def now():
 
 
 MIGRATIONS = {"odds": ["over_price real", "under_price real", "over_price_open real", "under_price_open real"],
-              "paper_bets": ["line real"]}
+              "paper_bets": ["line real"],
+              "player_games": [f"{c} real" for c in ("pts", "reb", "ast", "fg3m", "fga", "fta", "tov", "oreb", "stl", "blk")],
+              "summaries": ["v int"]}
 
 
 class Store:
@@ -88,11 +91,16 @@ class Store:
 
     def add_player_games(self, df: pd.DataFrame, source: str):
         rows = df.assign(source=source, date=df["date"].astype(str).str[:10], player_id=df["player_id"].astype(str))
+        cols = ["game_id", "date", "team", "player_id", "player", "played", "avail", "min", "gmsc", "pm", "source"]
+        cols += [c for c in ("pts", "reb", "ast", "fg3m", "fga", "fta", "tov", "oreb", "stl", "blk") if c in rows]
         self.con.executemany(
-            "insert or replace into player_games values (?,?,?,?,?,?,?,?,?,?,?)",
-            rows[["game_id", "date", "team", "player_id", "player", "played", "avail", "min", "gmsc", "pm",
-                  "source"]].itertuples(index=False, name=None))
+            f"insert or replace into player_games ({','.join(cols)}) values ({','.join('?' * len(cols))})",
+            rows[cols].itertuples(index=False, name=None))
         self.con.commit()
+
+    def add_linescores(self, rows):
+        """rows: (game_id, team, period, pts)"""
+        self.con.executemany("insert or replace into linescores values (?,?,?,?)", rows)
 
     def q(self, sql, params=()):
         return pd.read_sql(sql, self.con, params=params)

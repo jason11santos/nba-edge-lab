@@ -19,6 +19,7 @@ from .store import Store, now
 
 HIST_PLAYERS_END = "2024-04-28"   # last date in the downloaded player box scores
 OFFICIALS_FROM = "2023-10-24"
+VERSION = 2                       # 2: also keeps points/rebounds/assists/... and quarter scores
 
 
 def _log(*a):
@@ -47,7 +48,7 @@ def _fetch(espn_id):
 def fill(st: Store, ol_db: str | None = None, budget: int = 5000, threads: int = 8):
     """Fetch the summary of every finished game since 2023-24 not fetched yet. Officials for all of them;
     player lines for dates the downloaded history does not cover (and only if the store has none for that game)."""
-    done = set(st.q("select game_id from summaries")["game_id"])
+    done = set(st.q("select game_id from summaries where v >= ?", (VERSION,))["game_id"])
     todo = _games(st, ol_db)
     todo = todo[~todo["game_id"].isin(done)].head(budget)
     if todo.empty:
@@ -64,7 +65,11 @@ def fill(st: Store, ol_db: str | None = None, budget: int = 5000, threads: int =
             st.con.executemany("insert or replace into officials values (?,?,?)",
                                [(r.game_id, nm, i) for i, nm in enumerate(refs)])
             npl = 0
-            if r.date > HIST_PLAYERS_END and r.game_id not in have_pl:
+            try:
+                st.add_linescores([(r.game_id, t, per, pts) for t, per, pts in espn.linescores(js.get("header") or {})])
+            except Exception:  # noqa: BLE001
+                pass
+            if r.date > HIST_PLAYERS_END:
                 try:
                     pl = pd.DataFrame(espn.box_rows(js))
                 except (KeyError, TypeError, ValueError) as e:  # odd box score (All-Star game, missing athlete)
@@ -75,7 +80,8 @@ def fill(st: Store, ol_db: str | None = None, budget: int = 5000, threads: int =
                     pl["game_id"], pl["date"] = r.game_id, r.date
                     st.add_player_games(pl, "espn")
                     npl = len(pl)
-            st.con.execute("insert or replace into summaries values (?,?,?,?)", (r.game_id, now(), len(refs), npl))
+            st.con.execute("insert or replace into summaries (game_id, ts, n_refs, n_players, v) values (?,?,?,?,?)",
+                           (r.game_id, now(), len(refs), npl, VERSION))
             n_ok += 1
             if k % 250 == 249:
                 st.con.commit()
@@ -117,6 +123,45 @@ def _nba_page():
         if len(codes) == 2 and refs:
             out.append((codes, refs))
     return out
+
+
+def linescore_history(st: Store, dates, threads: int = 8):
+    """Quarter scores for older seasons from ESPN scoreboards (one request per date, every game that day).
+    Used by the first-half / quarter study. Skips dates already stored."""
+    from . import teams  # noqa: F401
+    have = set(st.q("select distinct substr(game_id, 1, 8) d from linescores")["d"])
+    todo = [d for d in sorted(set(dates)) if d.replace("-", "") not in have]
+    if not todo:
+        return 0
+    _log(f"fetching quarter scores for {len(todo)} dates")
+
+    def get(d):
+        try:
+            return espn._get(f"{espn.SITE}/scoreboard", {"dates": d.replace("-", ""), "limit": 50})
+        except Exception as e:  # noqa: BLE001
+            return e
+    n = 0
+    with ThreadPoolExecutor(threads) as ex:
+        for k, (d, js) in enumerate(zip(todo, ex.map(get, todo))):
+            if not isinstance(js, dict):
+                continue
+            rows = []
+            for ev in js.get("events", []):
+                comp = ev["competitions"][0]
+                side = {c.get("homeAway"): espn._code((c.get("team") or {}).get("abbreviation", ""))
+                        for c in comp.get("competitors", [])}
+                if not side.get("home") or not side.get("away"):
+                    continue
+                gid = d.replace("-", "") + side["home"] + side["away"]
+                rows += [(gid, t, per, pts) for t, per, pts in espn.linescores(comp)]
+            st.add_linescores(rows)
+            n += len(rows) > 0
+            if k % 200 == 199:
+                st.con.commit()
+                _log(f"  {k + 1}/{len(todo)}")
+    st.con.commit()
+    _log(f"quarter scores: {n} dates")
+    return n
 
 
 def today(st: Store, games: pd.DataFrame):

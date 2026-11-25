@@ -174,6 +174,24 @@ def officials(js) -> list[str]:
     return out
 
 
+def linescores(comp_or_header) -> list[tuple[str, int, float]]:
+    """Quarter-by-quarter points: [(team code, period, points)] from a scoreboard competition or summary header."""
+    comp = comp_or_header
+    if "competitions" in comp:
+        comp = comp["competitions"][0]
+    out = []
+    for c in comp.get("competitors", []):
+        code = _code((c.get("team") or {}).get("abbreviation", ""))
+        if not code:
+            continue
+        for i, ls in enumerate(c.get("linescores") or [], start=1):
+            v = ls.get("value", ls.get("displayValue"))
+            v = _num(v)
+            if v is not None:
+                out.append((code, int(ls.get("period", i)), float(v)))
+    return out
+
+
 def box_score(espn_id: str):
     """Player lines for one finished game, in the same shape as the historical box scores."""
     return box_rows(summary(espn_id))
@@ -199,7 +217,36 @@ def box_rows(js):
                     - 0.4 * f("fouls") - f("turnovers"))
             reason = (a.get("reason") or "").upper()
             played = mins > 0 and not a.get("didNotPlay")
+            fg3m, _ = pair("threePointFieldGoalsMade-threePointFieldGoalsAttempted")
             rows.append({"team": team, "espn_id": a["athlete"]["id"], "player": a["athlete"]["displayName"],
                          "played": played, "avail": 1.0 if played or "COACH" in reason else 0.0,
-                         "min": mins, "gmsc": gmsc, "pm": f("plusMinus")})
+                         "min": mins, "gmsc": gmsc, "pm": f("plusMinus"),
+                         "pts": f("points"), "reb": f("rebounds"), "ast": f("assists"), "fg3m": fg3m, "fga": fga,
+                         "fta": fta, "tov": f("turnovers"), "oreb": f("offensiveRebounds"), "stl": f("steals"),
+                         "blk": f("blocks")})
     return rows
+
+
+def probe_markets(espn_id: str) -> dict:
+    """What extra markets ESPN publishes for a game (player props, halves). Logged once a day to see what is free."""
+    out = {}
+    base = f"{CORE}/events/{espn_id}/competitions/{espn_id}/odds"
+    js = _get(base)
+    items = js.get("items", [])
+    out["providers"] = []
+    for it in items[:4]:
+        it = _get(it["$ref"]) if "$ref" in it and len(it) == 1 else it
+        prov = (it.get("provider") or {})
+        pid, name = prov.get("id"), prov.get("name")
+        keys = sorted(k for k in it.keys() if not k.startswith("$"))
+        rec = {"id": pid, "name": name, "keys": keys[:40]}
+        try:
+            pb = _get(f"{base}/{pid}/propBets", {"limit": 5})
+            rec["propBets_count"] = pb.get("count")
+            if pb.get("items"):
+                ex = pb["items"][0]
+                rec["propBets_example"] = {k: ex.get(k) for k in ("type", "athlete", "odds", "current") if k in ex}
+        except Exception as e:  # noqa: BLE001
+            rec["propBets_error"] = repr(e)[:80]
+        out["providers"].append(rec)
+    return out

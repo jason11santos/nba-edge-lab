@@ -192,3 +192,12 @@ def test_nba_referee_page_parser(monkeypatch):
             '</td><td>Ben Taylor (#46)</td><td>Jenna Reneau (#93)</td></tr></table>')
     monkeypatch.setattr(requests, "get", lambda *a, **k: type("R", (), {"text": html})())
     assert summaries._nba_page() == [({"LAC", "MEM"}, ["Scott Foster", "Ben Taylor", "Jenna Reneau"])]
+
+
+def test_box_rows_keep_raw_stats_and_linescores():
+    from nba_edge.sources import espn
+    r = espn.box_rows(SUMMARY)[0]
+    assert (r["pts"], r["reb"], r["ast"], r["fg3m"], r["fga"]) == (32, 7, 6, 3, 18)
+    comp = {"competitors": [{"homeAway": "home", "team": {"abbreviation": "MIN"},
+                             "linescores": [{"value": 30}, {"value": 25}]}]}
+    assert espn.linescores(comp) == [("MIN", 1, 30.0), ("MIN", 2, 25.0)]

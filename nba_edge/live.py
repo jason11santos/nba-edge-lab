@@ -801,9 +801,20 @@ def cloud_pass():
         if summaries.fill(st, openline.DB) and not st.meta("summaries_filled"):
             st.meta("summaries_filled", now())
             st.meta("retrain_needed", "1")
-        today_g = st.q("select game_id, espn_id, state from games where date in (?, ?)",
+        if not st.meta("linescores_hist"):  # quarter scores back to 2010, once (first-half / quarter study)
+            gh, _ = load_history()
+            dts = gh.loc[gh["date"] < pd.Timestamp(summaries.OFFICIALS_FROM), "date"].dt.strftime("%Y-%m-%d")
+            summaries.linescore_history(st, dts[dts >= "2010-10-01"].tolist())
+            st.meta("linescores_hist", now())
+                today_g = st.q("select game_id, espn_id, state from games where date in (?, ?)",
                        (date.today().isoformat(), (date.today() + timedelta(days=1)).isoformat()))
         log("referee crews posted for", summaries.today(st, today_g), "of", len(today_g), "upcoming games")
+        if st.meta("probe_day") != date.today().isoformat() and len(today_g):
+            st.meta("probe_day", date.today().isoformat())
+            try:
+                log("ESPN market probe:", json.dumps(espn.probe_markets(str(today_g["espn_id"].iloc[0])), default=str)[:3000])
+            except Exception as e:  # noqa: BLE001
+                log("ESPN market probe failed:", repr(e)[:200])
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     maybe_retrain(st)

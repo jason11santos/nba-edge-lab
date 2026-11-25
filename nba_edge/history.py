@@ -99,6 +99,13 @@ def _minutes(s: pd.Series) -> pd.Series:
     return out.fillna(num).fillna(0.0)
 
 
+# Raw box-score columns kept for player-level models (props). Same names in the live store.
+STAT_SRC = {"pts": "points", "reb": "reboundsTotal", "ast": "assists", "fg3m": "threePointersMade",
+            "fga": "fieldGoalsAttempted", "fta": "freeThrowsAttempted", "tov": "turnovers", "oreb": "reboundsOffensive",
+            "stl": "steals", "blk": "blocks"}
+STATS = list(STAT_SRC)
+
+
 def load_player_games(folder: str, games: pd.DataFrame) -> pd.DataFrame:
     """Player box scores, attached to our game ids by (date, team): a team plays at most once a day."""
     files = sorted(glob.glob(os.path.join(folder, "regular_season_box_scores_*.csv")))
@@ -116,6 +123,8 @@ def load_player_games(folder: str, games: pd.DataFrame) -> pd.DataFrame:
                   + 0.3 * st("reboundsDefensive") + st("steals") + 0.7 * st("assists") + 0.7 * st("blocks")
                   - 0.4 * st("foulsPersonal") - st("turnovers"))
     df["pm"] = st("plusMinusPoints")
+    for c, src in STAT_SRC.items():
+        df[c] = st(src)
     df["status"] = df["comment"].fillna("").str.split(" - ").str[0].str.strip()
     # Available = dressed and healthy, which is what the pre-game inactive list tells you.
     # "DNP - Coach's Decision" was available; DND (injury/rest), NWT and DNP-injury were not;
@@ -126,7 +135,8 @@ def load_player_games(folder: str, games: pd.DataFrame) -> pd.DataFrame:
     key = pd.concat([games[["date", "home", "game_id"]].rename(columns={"home": "team"}),
                      games[["date", "away", "game_id"]].rename(columns={"away": "team"})])
     df = df.merge(key, on=["date", "team"], how="inner")
-    out = df[["game_id", "date", "team", "personId", "personName", "played", "avail", "min", "gmsc", "pm", "status"]]
+    out = df[["game_id", "date", "team", "personId", "personName", "played", "avail", "min", "gmsc", "pm", "status"]
+             + list(STAT_SRC)]
     out = out.rename(columns={"personId": "player_id", "personName": "player"})
     out = out.drop_duplicates(subset=["game_id", "team", "player_id"])
     return out.sort_values(["date", "game_id", "team"]).reset_index(drop=True)

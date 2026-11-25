@@ -41,7 +41,7 @@ jobs:
             data/raw
             data/games.parquet
             data/player_games.parquet
-          key: history-v1
+          key: history-v2
 
       - name: Build historical tables (first run only)
         run: test -f data/games.parquet || python -m nba_edge setup
