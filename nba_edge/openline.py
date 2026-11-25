@@ -48,10 +48,20 @@ create table if not exists ol_lines (game_id text, book text, ml_home_open real,
 """
 
 
+TOTAL_COLS = ["tot_open", "tot_close", "over_open", "under_open", "over_close", "under_close"]
+
+
 def _con():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     c = sqlite3.connect(DB, timeout=60)
     c.executescript(SCHEMA)
+    have = {r[1] for r in c.execute("pragma table_info(ol_lines)")}
+    if not set(TOTAL_COLS) <= have:  # v2 adds opening/closing totals: add the columns and refetch every game once
+        for col in TOTAL_COLS:
+            if col not in have:
+                c.execute(f"alter table ol_lines add column {col} real")
+        c.execute("update ol_games set fetched=0")
+        c.commit()
     return c
 
 
@@ -67,9 +77,14 @@ def _all_books(espn_id):
         h, a = it.get("homeTeamOdds") or {}, it.get("awayTeamOdds") or {}
         am = lambda d, w: espn._num(((d.get(w) or {}).get("moneyLine") or {}).get("american"))  # noqa: E731
         sp = it.get("spread")
+        o, c = it.get("open") or {}, it.get("close") or {}
+        tv = lambda d, k: espn._num((d.get(k) or {}).get("american"))  # noqa: E731
         out.append((book, am(h, "open"), am(a, "open"), am(h, "close") or espn._num(h.get("moneyLine")),
                     am(a, "close") or espn._num(a.get("moneyLine")), None if sp is None else -float(sp),
-                    espn._num(it.get("overUnder"))))
+                    espn._num(it.get("overUnder")),
+                    tv(o, "total"), tv(c, "total") or espn._num(it.get("overUnder")),
+                    tv(o, "over"), tv(o, "under"), tv(c, "over") or espn._num(it.get("overOdds")),
+                    tv(c, "under") or espn._num(it.get("underOdds"))))
     return out
 
 
@@ -115,7 +130,9 @@ def fetch(end: date | None = None):
         for i, (gid, res) in enumerate(ex.map(lines, todo)):
             if isinstance(res, Exception):
                 continue
-            con.executemany("insert or replace into ol_lines values (?,?,?,?,?,?,?,?)", [(gid, *r) for r in res])
+            con.executemany("insert or replace into ol_lines (game_id, book, ml_home_open, ml_away_open, ml_home_close,"
+                            " ml_away_close, spread_close, total_close, " + ", ".join(TOTAL_COLS) + ")"
+                            " values (" + ",".join("?" * 14) + ")", [(gid, *r) for r in res])
             con.execute("update ol_games set fetched=1 where game_id=?", (gid,))
             if i % 200 == 0:
                 con.commit()
@@ -155,7 +172,7 @@ def load_lines():
         best_a_close=("ml_away_close", lambda s: s.iloc[np.argmax(decimal_odds(s))]),
         n_books=("book", "nunique"))
     d = g.merge(ref[["game_id", "book", "ml_home_open", "ml_away_open", "ml_home_close", "ml_away_close",
-                     "p_open", "p_close"]], on="game_id").merge(best, on="game_id")
+                     "p_open", "p_close"] + TOTAL_COLS], on="game_id").merge(best, on="game_id")
     d["date"] = pd.to_datetime(d["date"])
     d["y"] = (d["home_pts"] > d["away_pts"]).astype(float)
     return d.sort_values(["date", "game_id"]).reset_index(drop=True), ln
@@ -286,6 +303,113 @@ def bets_at(d, p, mh, ma, edge):
     return take, pnl, clv, home
 
 
+# --------------------------------------------------------------------------- line-move model
+
+MOVE_FEATS = ["dis", "lo", "lo2", "b2b_home", "b2b_away", "rest_diff", "travel_km_away", "season_frac",
+              "d_miss_min", "star_out_home", "star_out_away", "tot_dis"]
+
+
+def move_design(df: pd.DataFrame) -> pd.DataFrame:
+    """Features known when the line opens, for predicting how far it moves by tip-off (in log-odds)."""
+    lo = F.logit(df["p_open"].to_numpy(float))
+    D = pd.DataFrame({"dis": F.logit(df["p_stats"].to_numpy(float)) - lo, "lo": lo, "lo2": lo ** 2}, index=df.index)
+    for c in MOVE_FEATS[3:-1]:
+        D[c] = df[c].to_numpy(float) if c in df else np.nan
+    D["tot_dis"] = (df["total_pred"] - df["tot_open"]).to_numpy(float) / 10 if "tot_open" in df else np.nan
+    return D[MOVE_FEATS]
+
+
+def ridge_fit(D: pd.DataFrame, y, lam=20.0):
+    mu, sd = D.mean(), D.std().replace(0, 1).fillna(1)
+    Z = ((D.fillna(mu) - mu) / sd).to_numpy()
+    Zc = np.column_stack([np.ones(len(Z)), Z])
+    P = np.eye(Zc.shape[1]) * lam
+    P[0, 0] = 0
+    beta = np.linalg.solve(Zc.T @ Zc + P, Zc.T @ y)
+    return {"feats": list(D.columns), "mu": mu.fillna(0).round(6).tolist(), "sd": sd.round(6).tolist(),
+            "beta": beta.round(6).tolist()}
+
+
+def ridge_predict(m, D: pd.DataFrame):
+    mu, sd = pd.Series(m["mu"], index=m["feats"]), pd.Series(m["sd"], index=m["feats"])
+    Z = ((D[m["feats"]].fillna(mu) - mu) / sd).to_numpy()
+    return m["beta"][0] + Z @ np.array(m["beta"][1:])
+
+
+def move_study(d: pd.DataFrame, nights_all, slope, warmup=400, refit_days=30):
+    """Walk-forward: predict logit(close) - logit(open), then bet only where the predicted move toward one side is
+    bigger than half the bookmaker's margin. Pre-set margins: 0, 0.5 and 1 point of probability."""
+    D = move_design(d)
+    mv = F.logit(d["p_close"].to_numpy(float)) - F.logit(d["p_open"].to_numpy(float))
+    pred = np.full(len(d), np.nan)
+    m, last = None, None
+    for i, dt in enumerate(d["date"]):
+        if i < warmup:
+            continue
+        if last is None or (dt - last).days >= refit_days:
+            tr = (d["date"] < dt).to_numpy()
+            m = ridge_fit(D[tr], mv[tr])
+            last = dt
+        pred[i] = ridge_predict(m, D.iloc[[i]])[0]
+    ok = ~np.isnan(pred)
+    T = d[ok]
+    p_hat = F.sigmoid(F.logit(T["p_open"].to_numpy(float)) + pred[ok])
+    po, pc = T["p_open"].to_numpy(float), T["p_close"].to_numpy(float)
+    over = implied(T["ml_home_open"].to_numpy(float)) + implied(T["ml_away_open"].to_numpy(float))
+    half_vig = (over - 1) / 2
+    home = p_hat >= po
+    pred_clv = np.abs(p_hat - po)
+    real_clv = np.where(home, pc - po, po - pc)
+    dec = np.where(home, decimal_odds(T["ml_home_open"].to_numpy(float)), decimal_odds(T["ml_away_open"].to_numpy(float)))
+    won = np.where(home, T["y"] == 1, T["y"] == 0)
+    pnl = np.where(won, dec - 1, -1.0)
+    nights = np.asarray(nights_all)[ok]
+    resid0 = np.sum(mv[ok] ** 2)
+    out = {"n_games": int(ok.sum()), "r2_vs_no_move": float(1 - np.sum((mv[ok] - pred[ok]) ** 2) / resid0),
+           "corr": float(np.corrcoef(pred[ok], mv[ok])[0, 1]), "bets": {}}
+    for margin in (0.0, 0.005, 0.01):
+        take = pred_clv - half_vig > margin
+        if take.sum() == 0:
+            continue
+        out["bets"][f"predicted CLV > half the margin + {margin * 100:.1f} pts"] = {
+            "n": int(take.sum()), "roi": float(pnl[take].mean()), "roi_ci": _boot(pnl[take], nights[take]),
+            "avg_clv": float(real_clv[take].mean()), "clv_ci": _boot(real_clv[take], nights[take]),
+            "clv_positive_share": float(np.mean(real_clv[take] > 0)), "avg_pred_clv": float(pred_clv[take].mean())}
+    final = ridge_fit(D, mv)
+    final["margin"] = 0.005
+    final["shrink"] = float(np.clip(slope, 0.15, 1.0))
+    return final, out
+
+
+def totals_open_study(d: pd.DataFrame):
+    """Opening totals: does the total move toward the model, and do bets at the opening total gain points?"""
+    from . import totals as TT
+    t = d[d["tot_open"].notna() & d["tot_close"].notna() & d["total_pred"].notna()].copy()
+    t = t[(t["tot_open"].between(180, 280)) & (t["tot_close"].between(180, 280))]
+    act = (t["home_pts"] + t["away_pts"]).to_numpy(float)
+    to, tc, pr = t["tot_open"].to_numpy(float), t["tot_close"].to_numpy(float), t["total_pred"].to_numpy(float)
+    nights = t["date"].dt.strftime("%Y-%m-%d").to_numpy()
+    slope, pval = _ols_cluster(tc - to, pr - to, nights)
+    big = np.abs(pr - to) >= 3
+    out = {"n_games": int(len(t)), "mae_open": float(np.mean(np.abs(act - to))), "mae_close": float(np.mean(np.abs(act - tc))),
+           "mae_model": float(np.mean(np.abs(act - pr))), "line_move": {"slope": slope, "p_value": pval,
+           "toward_model_share": float(np.mean(np.sign(tc - to)[big] == np.sign(pr - to)[big])) if big.any() else None,
+           "n_disagree": int(big.sum())}, "bets": {}, "breakeven": TT.BREAKEVEN_110}
+    dec = lambda a: np.where(np.isnan(a), 1 + 100 / 110, decimal_odds(np.nan_to_num(a, nan=-110)))  # noqa: E731
+    for where, line, po, pu in [("open", to, dec(t["over_open"].to_numpy(float)), dec(t["under_open"].to_numpy(float))),
+                                ("close", tc, dec(t["over_close"].to_numpy(float)), dec(t["under_close"].to_numpy(float)))]:
+        for e in (2, 3, 4, 6):
+            side, pnl, _ = TT.ou_bets(pr, line, act, e, po, pu)
+            sm = TT.summary(side, pnl, nights)
+            if where == "open" and sm.get("n"):
+                k = side != 0
+                clv = (tc - to)[k] * side[k]
+                sm.update({"avg_clv_pts": float(clv.mean()), "clv_ci": _boot(clv, nights[k]),
+                           "clv_positive_share": float(np.mean(clv > 0)), "clv_zero_share": float(np.mean(clv == 0))})
+            out["bets"][f"{where} | model {e}+ pts off"] = sm
+    return out
+
+
 def study():
     from . import live
     d, ln = load_lines()
@@ -345,6 +469,18 @@ def study():
         by.append({"season": s, "n": int(len(q)), **{k: float(np.mean((q[c] - yy) ** 2)) for k, c in
                    [("open", "p_open"), ("close", "p_close"), ("blend", "p_blend"), ("stats_only", "p_stats")]}})
     res["by_season"] = by
+    print("line-move model and totals…", flush=True)
+    feats = ["game_id", "b2b_home", "b2b_away", "rest_diff", "travel_km_away", "season_frac", "d_miss_min",
+             "star_out_home", "star_out_away"]
+    from . import totals as TT
+    TP, tm = TT.walk_forward(X, test_from="2010-10-01")
+    d = d.merge(X[feats], on="game_id", how="left").merge(TP[["game_id", "total_pred"]], on="game_id", how="left")
+    res["move_model"], res["move"] = move_study(d, nights_all=d["date"].dt.strftime("%Y-%m-%d").to_numpy(),
+                                                slope=res["line_move"]["slope"])
+    res["totals"] = totals_open_study(d)
+    tc, _ = TT.backtest_vs_close(X)
+    res["totals"]["vs_close"] = {k: v for k, v in tc.items() if k != "weights_last"}
+    res["totals"]["weights"] = tm.weights()
     os.makedirs(os.path.join(ROOT, "web"), exist_ok=True)
     with open(os.path.join(ROOT, "web", "openline.json"), "w") as f:
         json.dump(res, f, indent=1, default=float)
@@ -374,7 +510,27 @@ def _print(r):
     for s in r["by_season"]:
         print(f"  {s['season']}  n={s['n']:5d}  open {s['open']:.4f}  close {s['close']:.4f}  "
               f"blend {s['blend']:.4f}  stats {s['stats_only']:.4f}")
-    print("\nSaved web/openline.json. Paste everything from 'OPENING-LINE STUDY' down back to Claude.")
+    mv = r.get("move")
+    if mv:
+        print(f"\nLine-move model (predicts close - open): R^2 vs 'no move' {mv['r2_vs_no_move']:+.3f}, corr {mv['corr']:+.3f}, n={mv['n_games']:,}")
+        for k, v in mv["bets"].items():
+            print(f"  {k:46s} {v['n']:6d} {v['roi']:+8.1%} {v['roi_ci'][0]:+8.1%} to {v['roi_ci'][1]:+6.1%}"
+                  f"  CLV {v['avg_clv']:+.2%} (pred {v['avg_pred_clv']:+.2%})  beat close {v['clv_positive_share']:.0%}")
+    t = r.get("totals")
+    if t:
+        lm = t["line_move"]
+        print(f"\nTotals at the open: n={t['n_games']:,}  MAE open {t['mae_open']:.2f} | close {t['mae_close']:.2f} | model {t['mae_model']:.2f}")
+        share = "n/a" if lm["toward_model_share"] is None else f"{lm['toward_model_share']:.0%}"
+        print(f"  total moves toward model: slope {lm['slope']:+.3f} (p = {lm['p_value']:.3f}), {share} of 3+ pt disagreements")
+        for k, v in t["bets"].items():
+            if not v.get("n"):
+                continue
+            clv = f"  CLV {v['avg_clv_pts']:+.2f} pts, beat close {v['clv_positive_share']:.0%}" if "avg_clv_pts" in v else ""
+            print(f"  {k:28s} {v['n']:6d}  win {v['win_rate']:.1%}  {v['roi']:+7.1%} ({v['roi_ci'][0]:+.1%} to {v['roi_ci'][1]:+.1%}){clv}")
+        vc = t.get("vs_close", {})
+        if vc:
+            print(f"  vs closing totals since 2013 (n={vc['n_games']:,}): MAE line {vc['mae_line']:.2f}, model {vc['mae_model']:.2f}")
+    print("\nSaved web/openline.json.")
 
 
 if __name__ == "__main__":

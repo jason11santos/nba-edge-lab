@@ -127,12 +127,12 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <nav class="secbar" aria-label="Sections"><a href="#tonight">Today</a><a href="#openline">Opening line</a><a href="#new">What's new</a><a href="#backtest">Backtest</a><a href="#accuracy">Accuracy</a><a href="#games">Games</a><a href="#run">Run it live</a><a href="#method">Method</a></nav>
 
 <section id="tonight">
- <div class="sec-head"><h2>Today and tomorrow</h2><p class="lede">Every model's forecast, the line's move since it opened, and who is on the injury report. Three paper-betting rules run side by side; the main one bets early, at the opening price, only when the model disagrees by enough to beat the bookmaker's cut.</p></div>
+ <div class="sec-head"><h2>Today and tomorrow</h2><p class="lede">Every model's forecast, the line's move since it opened, and who is on the injury report. Six paper-betting rules run side by side: two early-line moneyline rules, the line-move model, two totals rules and the old rule as a baseline. Each is judged by closing-line value.</p></div>
  <div class="livebar" id="livebar"></div>
  <div class="grid-3" id="cards"><div class="panel small">Loading tonight's slate…</div></div>
  <div class="grid-2" style="margin-top:16px">
   <div class="panel"><h3>How much the ensemble trusts each model now</h3><div class="bars" id="wnow" style="margin-top:12px"></div><p class="small" style="margin-top:10px">Weights move after every game night toward whichever forecaster has had the lowest recent log loss.</p></div>
-  <div class="panel"><h3>Paper-trading record, by rule</h3><div class="tbl-wrap" style="margin-top:8px"><table class="t" id="paper"></table></div><p class="small" style="margin-top:10px">Closing-line value (CLV): how much better our price was than the fair closing price, in probability points. It settles far faster than profit. Above about 2.5 points on average over 150+ bets would be real evidence of an edge at one book.</p></div>
+  <div class="panel" style="grid-column:1/-1;order:-1"><h3>Paper-trading record, by rule</h3><div class="tbl-wrap" style="margin-top:8px"><table class="t" id="paper"></table></div><p class="small" style="margin-top:10px">Closing-line value (CLV): how much better our price was than the closing price, in points of win probability for moneylines and points of total for over/unders. It settles far faster than profit. Moneylines: above about +2.5 on average over 150+ bets is real evidence. Totals: above about +1 point. "Flat return" bets $1 on every pick; stakes are sized on a shrunk, realistic edge and can be zero.</p></div>
  </div>
 </section>
 
@@ -237,8 +237,8 @@ const impl = (ml) => (ml < 0 ? -ml / (-ml + 100) : 100 / (ml + 100));
 const fmtML = (m) => m == null ? '—' : (m > 0 ? '+' : '') + Math.round(m);
 const css = (v) => getComputedStyle(document.body).getPropertyValue(v).trim() || getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const color = (v) => { const el = document.createElement('i'); el.style.color = `var(${v})`; document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove(); return c; };
-const NAMES = {early:'Model + opening price', market:'Market', ensemble:'Adaptive ensemble', mkt_gbm:'Market + boosted trees', mkt_lr:'Market + regression', stats_lr:'Stats only, regression', stats_gbm:'Stats only, trees', v1:'October model'};
-const COL = {early:'--stats', market:'--market', ensemble:'--model', mkt_gbm:'--alt', mkt_lr:'--ink-2', stats_lr:'--stats', stats_gbm:'--muted', v1:'--v1'};
+const NAMES = {move:'Line-move model: predicted close', early:'Model + opening price', market:'Market', ensemble:'Adaptive ensemble', mkt_gbm:'Market + boosted trees', mkt_lr:'Market + regression', stats_lr:'Stats only, regression', stats_gbm:'Stats only, trees', v1:'October model'};
+const COL = {move:'--v1', early:'--stats', market:'--market', ensemble:'--model', mkt_gbm:'--alt', mkt_lr:'--ink-2', stats_lr:'--stats', stats_gbm:'--muted', v1:'--v1'};
 const charts = {};
 const mk = (id, cfg) => { if (charts[id]) charts[id].destroy(); charts[id] = new Chart($(id), cfg); };
 const legendHTML = (items) => items.map(([k, l]) => `<span><span class="key" style="background:var(${COL[k] || k})"></span>${esc(l)}</span>`).join('');
@@ -341,7 +341,7 @@ function renderOpenline(O) {
     {label:'How much the price sharpens before tip-off', value:`${b.open.toFixed(4)} → ${b.close.toFixed(4)}`, sub:'Brier, opening line → closing line'},
     {label:'Model + opening price vs the opening price', value:(c.mean >= 0 ? '+' : '') + c.mean.toFixed(5), sub:`Brier · 95% CI ${c.ci[0].toFixed(5)} to ${c.ci[1].toFixed(5)} · a tie`},
     {label:'Line moves toward the model', value:pct(m.toward_model_share, 0), sub:`of ${m.n_disagree.toLocaleString()} big disagreements · slope ${m.slope.toFixed(2)}, p ${m.p_value < 0.001 ? '< 0.001' : '= ' + m.p_value.toFixed(3)}`},
-    {label:'Closing-line value, main rule (EV > 3%)', value:main ? `+${(main.avg_clv * 100).toFixed(2)} pts` : '—', sub:main ? `${main.n} bets · ${pct(main.clv_positive_share, 0)} beat the close` : ''},
+    {label:'Closing-line value, main rule (EV > 3%)', value:main ? `${main.avg_clv >= 0 ? '+' : '−'}${Math.abs(main.avg_clv * 100).toFixed(2)} pts` : '—', sub:main ? `${main.n} bets · ${pct(main.clv_positive_share, 0)} beat the close` : ''},
   ];
   const ths = [1, 2, 3, 5].filter((e) => ref(e)), mx = Math.max(...ths.map((e) => ref(e).avg_clv), 0.01);
   const ci = (v) => `${sgn(v.roi_ci[0])} to ${sgn(v.roi_ci[1])}`;
@@ -349,14 +349,33 @@ function renderOpenline(O) {
   $('ol-body').innerHTML = `<div class="tiles" style="margin-bottom:16px">${tiles.map((t) => `<div class="tile"><div class="label">${t.label}</div><div class="value num">${t.value}</div><div class="sub">${t.sub}</div></div>`).join('')}</div>
    <div class="grid-2">
     <div class="panel"><div class="chart-title">Closing-line value climbs with the size of the disagreement</div><div class="chart-sub">Bets at one book's opening price. Average points of fair probability gained by the close. The bookmaker's cut at one book is about 2–2.5 points: above that line is profit territory.</div>
-     <div class="bars" style="margin-top:12px">${ths.map((e) => `<div class="br"><span>EV &gt; ${e}% · ${ref(e).n} bets</span><span class="track"><i style="width:${ref(e).avg_clv / mx * 100}%;background:var(--stats)"></i></span><span class="num" style="text-align:right">+${(ref(e).avg_clv * 100).toFixed(2)}</span></div>`).join('')}</div>
+     <div class="bars" style="margin-top:12px">${ths.map((e) => `<div class="br"><span>EV &gt; ${e}% · ${ref(e).n} bets</span><span class="track"><i style="width:${Math.max(0, ref(e).avg_clv) / mx * 100}%;background:var(--stats)"></i></span><span class="num" style="text-align:right">${ref(e).avg_clv >= 0 ? '+' : '−'}${Math.abs(ref(e).avg_clv * 100).toFixed(2)}</span></div>`).join('')}</div>
      <p class="small" style="margin-top:12px">The same model bet at the <b>closing</b> price loses about ${refc(2) ? sgn(Math.abs(refc(2).roi)).slice(1) : '9%'} per dollar: the edge exists only before the market catches up. That is why the live system's main rule bets early and stops once the line has moved 1.5 points.</p></div>
     <div class="panel"><div class="chart-title">By season</div><div class="chart-sub">Brier score; lower is better. The closing line beats the open every season.</div>
      <div class="tbl-wrap"><table class="t"><thead><tr><th>Season</th><th class="n">Games</th><th class="n">Open</th><th class="n">Close</th><th class="n">Model + open</th><th class="n">Stats only</th></tr></thead><tbody>${(O.by_season || []).map((r) => `<tr><td>${esc(r.season)}</td><td class="n">${r.n}</td><td class="n">${r.open.toFixed(4)}</td><td class="n">${r.close.toFixed(4)}</td><td class="n">${r.blend.toFixed(4)}</td><td class="n">${r.stats_only.toFixed(4)}</td></tr>`).join('')}</tbody></table></div></div>
     <div class="panel" style="grid-column:1/-1"><div class="chart-title">Every rule tested</div><div class="chart-sub">Return per $1 with 95% intervals that resample game nights. 16 rules were tried, so expect at least one to look good by luck. "Best book" prices come almost entirely from 2023-24, the only season with many books.</div>
      <div class="tbl-wrap"><table class="t"><thead><tr><th>Where / rule</th><th class="n">Bets</th><th class="n">Return</th><th class="n">95% CI</th><th class="n">CLV, pts</th><th class="n">Beat close</th></tr></thead><tbody>${rowsT}</tbody></table></div></div>
    </div>
+   ${moveHTML(O)}${totalsHTML(O)}
    <p class="small" style="margin-top:12px">Caveat: any independent forecast shows some line movement toward it when opening prices are noisy. What counts is closing-line value larger than the bookmaker's cut, which so far holds only for the larger disagreements, on small samples. The live paper record above is the forward test.</p>`;
+}
+
+function betRows(B, clvKey, clvFmt) {
+  return Object.entries(B || {}).filter(([k, v]) => v && v.n).map(([k, v]) => `<tr><td>${esc(k.replace(' | ', ', '))}</td><td class="n">${v.n}</td><td class="n">${v.win_rate != null ? pct(v.win_rate, 1) : '—'}</td><td class="n">${sgn(v.roi)}</td><td class="n">${v.roi_ci ? `${sgn(v.roi_ci[0])} to ${sgn(v.roi_ci[1])}` : '—'}</td><td class="n">${v[clvKey] == null ? '—' : clvFmt(v[clvKey])}</td><td class="n">${v.clv_positive_share == null ? '—' : pct(v.clv_positive_share, 0)}</td></tr>`).join('');
+}
+const thead = '<thead><tr><th>Rule</th><th class="n">Bets</th><th class="n">Won</th><th class="n">Return</th><th class="n">95% CI</th><th class="n">CLV</th><th class="n">Beat close</th></tr></thead>';
+function moveHTML(O) {
+  const m = O.move; if (!m) return '';
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">Line-move model: predict where the line closes</div>
+   <div class="chart-sub">Ridge regression on what is known at the open (the model's disagreement, the price itself, rest, travel, lineups, the totals gap) predicting the move from open to close. Walk-forward on ${m.n_games.toLocaleString()} games. It explains ${(m.r2_vs_no_move * 100).toFixed(1)}% of the variance in line moves (correlation ${m.corr.toFixed(2)}). Bets need the predicted move to beat half the bookmaker's margin.</div>
+   <div class="tbl-wrap"><table class="t">${thead}<tbody>${betRows(m.bets, 'avg_clv', (x) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + ' pts')}</tbody></table></div></div>`;
+}
+function totalsHTML(O) {
+  const t = O.totals; if (!t) return '';
+  const lm = t.line_move || {}, vc = t.vs_close || {};
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">Totals (over/under) at the open</div>
+   <div class="chart-sub">${t.n_games.toLocaleString()} games. Average miss: opening total ${t.mae_open.toFixed(2)} pts, closing total ${t.mae_close.toFixed(2)}, model ${t.mae_model.toFixed(2)}. The total moves toward the model ${lm.toward_model_share == null ? '—' : pct(lm.toward_model_share, 0)} of the time when they differ by 3+ points (slope ${lm.slope?.toFixed(2)}, p ${lm.p_value < 0.001 ? '< 0.001' : '= ' + lm.p_value?.toFixed(3)}). Break-even at −110 is ${pct(t.breakeven, 1)}.${vc.n_games ? ` Against closing totals since 2013 (${vc.n_games.toLocaleString()} games) the model misses by ${vc.mae_model.toFixed(2)} vs the line's ${vc.mae_line.toFixed(2)}: the close is hard to beat here too.` : ''}</div>
+   <div class="tbl-wrap"><table class="t">${thead}<tbody>${betRows(t.bets, 'avg_clv_pts', (x) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2) + ' pts')}</tbody></table></div></div>`;
 }
 
 // ---------------- Tonight
@@ -379,9 +398,11 @@ function renderLive(L) {
   $('wnow').innerHTML = Object.entries(w).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="br"><span><span class="key" style="background:var(${COL[k]})"></span>${NAMES[k] || esc(k)}</span><span class="track"><i style="width:${v / wm * 100}%;background:var(${COL[k]})"></i></span><span class="num" style="text-align:right">${(v * 100).toFixed(0)}%</span></div>`).join('');
   const P = L.paper || {};
   const R = P.rules || {ens2:{label:'Ensemble at current line, EV > 2%', open:P.open ?? 0, settled:P.settled ?? 0, avg_clv:P.avg_clv, roi:P.roi}};
-  const clvCell = (v) => v.avg_clv == null ? '—' : `<span class="${v.avg_clv > 0 ? 'pos' : 'neg'}">${v.avg_clv >= 0 ? '+' : '−'}${Math.abs(v.avg_clv * 100).toFixed(2)}</span>${v.clv_se ? ` <span class="small">±${(1.96 * v.clv_se * 100).toFixed(2)}</span>` : ''}`;
-  $('paper').innerHTML = `<thead><tr><th>Rule</th><th class="n">Open</th><th class="n">Settled</th><th class="n">Avg CLV, pts</th><th class="n">Beat close</th><th class="n">Return</th></tr></thead><tbody>` +
-    Object.values(R).map((v) => `<tr><td style="white-space:normal">${esc(v.label)}</td><td class="n">${v.open ?? 0}</td><td class="n">${v.settled ?? 0}</td><td class="n">${clvCell(v)}</td><td class="n">${v.beat_close == null ? '—' : pct(v.beat_close, 0)}</td><td class="n">${v.roi == null ? '—' : sgn(v.roi)}</td></tr>`).join('') + '</tbody>';
+  const clvCell = (v) => { if (v.avg_clv == null) return '—'; const k = v.market === 'total' ? 1 : 100, u = v.market === 'total' ? ' pts' : '';
+    return `<span class="${v.avg_clv > 0 ? 'pos' : 'neg'}">${v.avg_clv >= 0 ? '+' : '−'}${Math.abs(v.avg_clv * k).toFixed(2)}${u}</span>${v.clv_se ? ` <span class="small">±${(1.96 * v.clv_se * k).toFixed(2)}</span>` : ''}`; };
+  const ret = (v) => v.flat_roi ?? v.roi;
+  $('paper').innerHTML = `<thead><tr><th>Rule</th><th class="n">Open</th><th class="n">Settled</th><th class="n">Won</th><th class="n">Avg CLV</th><th class="n">Beat close</th><th class="n">Flat return</th></tr></thead><tbody>` +
+    Object.values(R).map((v) => `<tr><td style="white-space:normal">${esc(v.label)}</td><td class="n">${v.open ?? 0}</td><td class="n">${v.settled ?? 0}</td><td class="n">${v.win_rate == null ? '—' : pct(v.win_rate, 0)}</td><td class="n">${clvCell(v)}</td><td class="n">${v.beat_close == null ? '—' : pct(v.beat_close, 0)}</td><td class="n">${ret(v) == null ? '—' : sgn(ret(v))}</td></tr>`).join('') + '</tbody>';
 }
 function card(g) {
   const p = g.p || {}, pe = p.ensemble, pk = p.market, ln = g.line || {};
@@ -389,7 +410,7 @@ function card(g) {
   const score = g.score ? `<span class="num">${g.score[1]}–${g.score[0]}</span>` : '';
   const mv = (a, b) => a == null || b == null || a === b ? '' : ` <span class="small">(open ${fmtML(a)})</span>`;
   const sp = (x) => x == null ? '—' : (x > 0 ? `${esc(g.home)} −${x}` : x < 0 ? `${esc(g.away)} −${-x}` : 'Pick');
-  const rows = [['ensemble', pe], ['market', pk], ['early', p.early], ['mkt_gbm', p.mkt_gbm], ['stats_lr', p.stats_lr]]
+  const rows = [['ensemble', pe], ['market', pk], ['early', p.early], ['move', p.move], ['mkt_gbm', p.mkt_gbm], ['stats_lr', p.stats_lr]]
     .filter(([k, v]) => v != null)
     .map(([k, v]) => `<div><span class="key" style="background:var(${COL[k]})"></span>${NAMES[k]}</div><div>${pct(v)}</div>`).join('') +
     (g.p_open != null ? `<div class="small">Opening fair price${g.line_move != null ? `, moved ${(g.line_move * 100).toFixed(1)} pts since` : ''}</div><div class="small">${pct(g.p_open)}</div>` : '');
@@ -400,9 +421,10 @@ function card(g) {
   const picks = g.picks || (g.pick ? [{...g.pick, rule:'ens2', why:g.pick.bet ? null : 'EV under 2%'}] : []);
   const pick = !picks.length ? (g.state === 'pre' ? 'No price yet.' : 'Game under way or final.') : picks.map((x) => {
     const lab = RL[x.rule]?.label || x.rule, lk = locked[x.rule];
-    if (lk) return `<div><b>${esc(lab)}:</b> paper bet ${esc(lk.side === 'home' ? g.home : g.away)} ${fmtML(lk.price)} at ${esc(lk.book)}, EV <span class="pos">${sgn(lk.ev)}</span>, stake ${pct(lk.stake, 2)}</div>`;
-    if (x.bet) return `<div><b>${esc(lab)}:</b> paper bet ${esc(x.team)} ${fmtML(x.ml)} at ${esc(x.book)}, EV <span class="pos">${sgn(x.ev)}</span></div>`;
-    return `<div><b>${esc(lab)}:</b> no bet. ${esc(x.team)} ${fmtML(x.ml)} EV <span class="${x.ev > 0 ? 'pos' : 'neg'}">${sgn(x.ev)}</span>${x.why ? ` (${esc(x.why)})` : ''}</div>`;
+    const what = (side, line, price) => side === 'over' || side === 'under' ? `${side} ${line} ${fmtML(price)}` : `${esc(side === 'home' ? g.home : side === 'away' ? g.away : side)} ${fmtML(price)}`;
+    if (lk) return `<div><b>${esc(lab)}:</b> paper bet ${what(lk.side, lk.line, lk.price)} at ${esc(lk.book)}, realistic EV <span class="${lk.ev > 0 ? 'pos' : 'neg'}">${sgn(lk.ev)}</span>, stake ${pct(lk.stake, 2)}</div>`;
+    if (x.bet) return `<div><b>${esc(lab)}:</b> paper bet ${what(x.side, x.line, x.ml)} at ${esc(x.book)}, realistic EV <span class="${x.ev_realistic > 0 ? 'pos' : 'neg'}">${sgn(x.ev_realistic ?? x.ev)}</span></div>`;
+    return `<div><b>${esc(lab)}:</b> no bet. ${what(x.side, x.line, x.ml)}${x.market === 'total' ? '' : ` EV <span class="${x.ev > 0 ? 'pos' : 'neg'}">${sgn(x.ev)}</span>`}${x.why ? ` (${esc(x.why)})` : ''}</div>`;
   }).join('');
   return `<article class="card" aria-label="${esc(g.away)} at ${esc(g.home)}">
    <div class="card-top"><span class="matchup">${esc(g.away)} @ ${esc(g.home)}</span><span class="small">${esc(g.state === 'pre' ? tip : g.status)} ${score}</span></div>
@@ -412,6 +434,7 @@ function card(g) {
    <div class="kv">${rows}</div>
    <div class="kv"><div>Moneyline ${esc(g.away)}</div><div>${fmtML(ln.ml_away)}${mv(ln.ml_away_open, ln.ml_away)}</div><div>Moneyline ${esc(g.home)}</div><div>${fmtML(ln.ml_home)}${mv(ln.ml_home_open, ln.ml_home)}</div>
     <div>Spread</div><div>${sp(ln.spread)}${ln.spread_open != null && ln.spread_open !== ln.spread ? ` <span class="small">(open ${sp(ln.spread_open)})</span>` : ''}</div><div>Total</div><div>${ln.total ?? '—'}${ln.total_open != null && ln.total_open !== ln.total ? ` <span class="small">(open ${ln.total_open})</span>` : ''}</div>
+    ${g.totals && g.totals.pred != null ? `<div>Total, model</div><div>${g.totals.pred.toFixed(1)} <span class="small">vs ${ln.total ?? '—'}</span></div>` : ''}
     <div>Elo</div><div>${g.elo ? `${Math.round(g.elo[1])} / ${Math.round(g.elo[0])}` : '—'}</div><div>Rest, days</div><div>${g.rest ? `${g.rest[1]} / ${g.rest[0]}` : '—'}</div>
     <div>${esc(g.away)} travel</div><div>${g.travel_km_away != null ? Math.round(g.travel_km_away).toLocaleString() + ' km' : '—'}</div></div>
    ${injHTML ? `<div><div class="small" style="margin-bottom:4px">Injury report, rotation players, chance to play</div><ul class="inj">${injHTML}</ul></div>` : '<div class="small">No rotation players on the injury report.</div>'}

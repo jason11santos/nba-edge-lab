@@ -70,6 +70,8 @@ def _odds_from_scoreboard(c):
         "spread": None if home_line is None else -float(home_line),
         "spread_open": None if g(ps, "home", "open", "line") is None else -g(ps, "home", "open", "line"),
         "total": _num(o.get("overUnder")), "total_open": g(tot, "over", "open", "line"),
+        "over_price": g(tot, "over", "close", "odds"), "under_price": g(tot, "under", "close", "odds"),
+        "over_price_open": g(tot, "over", "open", "odds"), "under_price_open": g(tot, "under", "open", "odds"),
     }
 
 
@@ -117,7 +119,9 @@ def closing_odds(espn_id: str):
     return {"provider": (it.get("provider") or {}).get("name"),
             "ml_home": am(h, "close") or _num(h.get("moneyLine")), "ml_away": am(a, "close") or _num(a.get("moneyLine")),
             "ml_home_open": am(h, "open"), "ml_away_open": am(a, "open"),
-            "spread": None if sp is None else -float(sp), "total": _num(it.get("overUnder"))}
+            "spread": None if sp is None else -float(sp), "total": _num(it.get("overUnder")),
+            "over_price": _num(it.get("overOdds")), "under_price": _num(it.get("underOdds")),
+            "total_open": _num(((it.get("open") or {}).get("total") or {}).get("american"))}
 
 
 # Probability a player suits up, by injury-report status. Rough league-wide base rates.

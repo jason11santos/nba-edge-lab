@@ -65,7 +65,16 @@ tests/            parsers checked against recorded ESPN responses, plus no-look-
 |---|---|---|
 | Early line, EV > 3% (main) | model blended with the opening price | EV > 3% at the opening price and now; line moved ≤ 1.5 pts overall and ≤ 0.5 pts against our side |
 | Early line, EV > 5% | same | same, with 5% |
+| Line-move model | predicted closing price (ridge regression on what is known at the open) | predicted move toward one side beats half the bookmaker's margin by 0.5 pts; same open-window guards |
+| Totals early, 3+ / 5+ pts | totals model (team scoring, market pace, league trend, rest, lineups) | model at least 3 (5) points from the opening total and from the best available total; total moved ≤ 2.5 pts, ≤ 1 against us |
 | Ensemble at current line (old rule) | adaptive ensemble | EV > 2% at the current best price |
+
+Stakes: quarter-Kelly, capped at 2%, on a shrunk edge. The opening-line study found the line moves only about a quarter of
+the way toward the model, so the model's disagreement with the current fair price is multiplied by that slope before
+sizing. A bet whose shrunk edge does not beat the margin is still logged (stake 0) so its closing-line value is measured.
+
+Line shopping: with an `ODDS_API_KEY` secret, every US book's moneyline and total is pulled at most every 2 hours between
+7 AM and 8 PM Pacific (about 420 of the free plan's 500 monthly credits), and each bet takes the best available price.
 
 Each rule is tracked separately with closing-line value (CLV). Judge the rules by CLV, not profit: profit needs
 thousands of bets to separate from luck; CLV settles within a few hundred.

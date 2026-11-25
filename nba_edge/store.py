@@ -34,10 +34,20 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+MIGRATIONS = {"odds": ["over_price real", "under_price real", "over_price_open real", "under_price_open real"],
+              "paper_bets": ["line real"]}
+
+
 class Store:
     def __init__(self, path):
-        self.con = sqlite3.connect(path)
+        self.con = sqlite3.connect(path, timeout=60)
         self.con.executescript(SCHEMA)
+        for table, cols in MIGRATIONS.items():
+            have = {r[1] for r in self.con.execute(f"pragma table_info({table})")}
+            for c in cols:
+                if c.split()[0] not in have:
+                    self.con.execute(f"alter table {table} add column {c}")
+        self.con.commit()
 
     def upsert_games(self, rows):
         self.con.executemany(
@@ -48,16 +58,19 @@ class Store:
         self.con.commit()
 
     def add_odds(self, game_id, source, kind, o, ts=None):
-        keys = ("ml_home", "ml_away", "spread", "total")
-        prev = self.con.execute("select ml_home, ml_away, spread, total from odds where game_id=? and source=? and kind=?"
-                                " order by ts desc limit 1", (game_id, source, kind)).fetchone()
+        keys = ("ml_home", "ml_away", "spread", "total", "over_price", "under_price")
+        prev = self.con.execute("select ml_home, ml_away, spread, total, over_price, under_price from odds where game_id=?"
+                                " and source=? and kind=? order by ts desc limit 1", (game_id, source, kind)).fetchone()
         if prev is not None and all((a is None and o.get(k) is None) or (a is not None and o.get(k) is not None and
                                     abs(a - o.get(k)) < 1e-9) for a, k in zip(prev, keys)):
             return  # unchanged since the last snapshot
-        self.con.execute("insert into odds values (?,?,?,?,?,?,?,?,?,?,?,?)",
+        self.con.execute("insert into odds (ts, game_id, source, kind, ml_home, ml_away, ml_home_open, ml_away_open,"
+                         " spread, spread_open, total, total_open, over_price, under_price, over_price_open,"
+                         " under_price_open) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (ts or now(), game_id, source, kind, o.get("ml_home"), o.get("ml_away"),
                           o.get("ml_home_open"), o.get("ml_away_open"), o.get("spread"), o.get("spread_open"),
-                          o.get("total"), o.get("total_open")))
+                          o.get("total"), o.get("total_open"), o.get("over_price"), o.get("under_price"),
+                          o.get("over_price_open"), o.get("under_price_open")))
         self.con.commit()
 
     def add_injuries(self, rows):

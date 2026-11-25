@@ -148,3 +148,23 @@ def test_lineup_uses_only_earlier_games():
     assert np.isnan(lf.loc[0, "loss_gmsc_home"]) or lf.loc[0, "loss_gmsc_home"] == 0
     assert lf.loc[2, "loss_gmsc_home"] > 0
     assert lf.loc[2, "miss_min_home"] == pytest.approx(36)
+
+
+def test_totals_bets_and_push():
+    from nba_edge import totals as TT
+    pred = np.array([230.0, 210.0, 225.0, 220.0])
+    line = np.array([224.0, 216.0, 224.0, 220.0])
+    act = np.array([231.0, 205.0, 224.0, 240.0])
+    side, pnl, _ = TT.ou_bets(pred, line, act, 3)
+    assert list(side) == [1, -1, 0, 0]          # over, under, too close, no edge
+    assert pnl[0] > 0 and pnl[1] > 0 and np.isnan(pnl[2])
+    side, pnl, _ = TT.ou_bets(np.array([230.0]), np.array([224.0]), np.array([224.0]), 3)
+    assert pnl[0] == 0.0                         # push returns the stake
+
+
+def test_odds_api_budget():
+    from nba_edge.sources import oddsapi
+    from datetime import datetime, timedelta, timezone
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    assert oddsapi.due(recent) is False          # never twice inside 2 hours
+    assert 7 * 2 * 31 <= 500                     # 7 calls a day x 2 credits fits the free plan
