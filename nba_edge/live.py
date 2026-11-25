@@ -695,7 +695,9 @@ def maybe_retrain(st: Store, hour=4):
     from zoneinfo import ZoneInfo
     now_pt = datetime.now(ZoneInfo("America/Los_Angeles"))
     last = st.meta("last_retrain_day") or ""
-    if _load_model() is None or (now_pt.hour >= hour and last != now_pt.date().isoformat()):
+    mdl = _load_model()
+    outdated = mdl is None or "totals" not in mdl   # a model saved by older code is missing newer parts
+    if outdated or (now_pt.hour >= hour and last != now_pt.date().isoformat()):
         sync_players(st, seasons=(teams.season_of(now_pt),))
         retrain(st)
         st.meta("last_retrain_day", now_pt.date().isoformat())
