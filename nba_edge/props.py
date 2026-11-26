@@ -30,8 +30,12 @@ def _ewm(df, col, hl, by="player_id"):
 
 def build(pg: pd.DataFrame, g: pd.DataFrame) -> pd.DataFrame:
     """One row per player-game (all box-score rows, including those who did not play). Features are pre-game."""
-    g = g[["game_id", "date", "home", "away", "home_pts", "away_pts", "spread", "total"]].copy()
-    df = pg.merge(g[["game_id", "home", "away", "spread", "total", "home_pts", "away_pts"]], on="game_id", how="inner")
+    g = g[["game_id", "date", "home", "away", "home_pts", "away_pts", "spread", "total", "ml_home", "ml_away"]].copy()
+    # older spreads are unsigned: sign by the moneyline favourite (expected home margin, + = home favoured)
+    fav_home = pd.to_numeric(g["ml_home"], errors="coerce") < pd.to_numeric(g["ml_away"], errors="coerce")
+    g["spread"] = pd.to_numeric(g["spread"], errors="coerce").abs() * np.where(fav_home, 1.0, -1.0)
+    df = pg.drop(columns=[c for c in ("home", "away") if c in pg]).merge(
+        g[["game_id", "home", "away", "spread", "total", "home_pts", "away_pts"]], on="game_id", how="inner")
     df = df.sort_values(["date", "game_id", "team"]).reset_index(drop=True)
     df["player_id"] = df["player_id"].astype(str)
     df["home_side"] = (df["team"] == df["home"]).astype(float)
@@ -165,3 +169,17 @@ def evaluate(df: pd.DataFrame, pred, target="pts"):
     r = y - pred[m]
     out["resid_sd"] = float(np.std(r))
     return out
+
+
+def study(g: pd.DataFrame, pg: pd.DataFrame):
+    """All four targets, walk-forward since 2014-15, plus the ESPN-era slice (2024-25 on) on its own."""
+    df = build(pg, g)
+    res = {}
+    for t in TARGETS:
+        p = walk_forward(df, t)
+        res[t] = evaluate(df, p, t)
+        recent = (df["season"] >= "2024-25").to_numpy()
+        p2 = np.where(recent, p, np.nan)
+        if np.isfinite(p2).sum() > 1000:
+            res[t]["recent"] = {k: v for k, v in evaluate(df, p2, t).items() if k in ("n", "mae", "teammate_newly_out", "disagree")}
+    return res, df

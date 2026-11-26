@@ -504,6 +504,16 @@ def study():
     res["rest"] = {**rest_eval, "move_r2_without": base_r["r2_vs_no_move"], "move_r2_with": rest_r["r2_vs_no_move"],
                    "move_corr_without": base_r["corr"], "move_corr_with": rest_r["corr"],
                    "bets_without": base_r["bets"], "bets_with": rest_r["bets"], "used_live": bool(better)}
+    try:  # player props: projections vs the simple projections a lazy line is built from
+        from . import props as PR
+        res["props"], _ = PR.study(g, pg)
+    except Exception as e:  # noqa: BLE001
+        res["props"] = {"error": repr(e)}
+    try:  # first half / first quarter: team start speed vs a fixed share of the full-game total
+        from . import halves as HV
+        res["halves"] = HV.study(g, live._store().q("select * from linescores"))
+    except Exception as e:  # noqa: BLE001
+        res["halves"] = {"error": repr(e)}
     try:
         from . import refs
         off = live._store().q("select game_id, ref from officials")

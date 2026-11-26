@@ -356,7 +356,7 @@ function renderOpenline(O) {
     <div class="panel" style="grid-column:1/-1"><div class="chart-title">Every rule tested</div><div class="chart-sub">Return per $1 with 95% intervals that resample game nights. 16 rules were tried, so expect at least one to look good by luck. "Best book" prices come almost entirely from 2023-24, the only season with many books.</div>
      <div class="tbl-wrap"><table class="t"><thead><tr><th>Where / rule</th><th class="n">Bets</th><th class="n">Return</th><th class="n">95% CI</th><th class="n">CLV, pts</th><th class="n">Beat close</th></tr></thead><tbody>${rowsT}</tbody></table></div></div>
    </div>
-   ${moveHTML(O)}${totalsHTML(O)}${restHTML(O)}${refsHTML(O)}
+   ${moveHTML(O)}${totalsHTML(O)}${propsHTML(O)}${halvesHTML(O)}${restHTML(O)}${refsHTML(O)}
    <p class="small" style="margin-top:12px">Caveat: any independent forecast shows some line movement toward it when opening prices are noisy. What counts is closing-line value larger than the bookmaker's cut, which so far holds only for the larger disagreements, on small samples. The live paper record above is the forward test.</p>`;
 }
 
@@ -378,6 +378,29 @@ function totalsHTML(O) {
    <div class="tbl-wrap"><table class="t">${thead}<tbody>${betRows(t.bets, 'avg_clv_pts', (x) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2) + ' pts')}</tbody></table></div></div>`;
 }
 
+function propsHTML(O) {
+  const P = O.props; if (!P || P.error || !P.pts) return '';
+  const NM = {pts:'Points', reb:'Rebounds', ast:'Assists', fg3m:'Threes'};
+  const rows = Object.entries(P).filter(([k, r]) => r && r.mae).map(([k, r]) => {
+    const d = Object.entries(r.disagree || {}), top = d[d.length - 1], mid = d[1] || d[0];
+    const nb = r.teammate_newly_out || {};
+    return `<tr><td>${NM[k] || k}</td><td class="n">${r.mae['season average'].toFixed(2)}</td><td class="n">${r.mae.model.toFixed(2)}</td><td class="n">${(nb.bias?.['season average'] ?? 0).toFixed(2)} → ${(nb.bias?.model ?? 0).toFixed(2)}</td><td class="n">${mid ? `${pct(mid[1].right_side_of_season_avg, 0)} <span class="small">(${mid[0]}, n ${mid[1].n.toLocaleString()})</span>` : '—'}</td><td class="n">${r.recent?.disagree?.[mid?.[0]] ? pct(r.recent.disagree[mid[0]].right_side_of_season_avg, 0) : '—'}</td></tr>`;
+  }).join('');
+  const r = P.pts;
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">Player props: projections vs simple averages</div>
+   <div class="chart-sub">LightGBM per stat, refit each season on earlier seasons (${r.n.toLocaleString()} rotation player-games, ${esc(r.from)} to ${esc(r.to)}). Inputs: minutes and per-minute rates at several horizons, opponent allowances, the game's total and spread, rest, and usage from teammates who are out tonight. "Right side" = how often the result landed on the model's side of a line set at the player's season average, when the model disagreed by the amount shown.</div>
+   <div class="tbl-wrap"><table class="t"><thead><tr><th>Stat</th><th class="n">Avg miss, season avg</th><th class="n">Avg miss, model</th><th class="n">Bias when a teammate is newly out</th><th class="n">Right side vs season-avg line</th><th class="n">Same, 2024-25 on</th></tr></thead><tbody>${rows}</tbody></table></div>
+   <p class="small">Verdict: the model beats every simple projection, most of all when a teammate has just been ruled out (simple averages run low; the model is unbiased). Real prop lines are smarter than a season average, so the right-side rates are an upper bound. Next step: compare with real prop lines going forward.</p></div>`;
+}
+function halvesHTML(O) {
+  const H = O.halves; if (!H || H.error || !H.h1) return '';
+  const tr = (lab, r) => Object.entries(r.vs_fixed_line || {}).map(([k, v]) => `<tr><td>${lab}, model ${esc(k)} off</td><td class="n">${v.n.toLocaleString()}</td><td class="n">${pct(v.win_rate, 1)}</td><td class="n">${sgn(v.roi_at_110)}</td><td class="n">${sgn(v.roi_ci[0])} to ${sgn(v.roi_ci[1])}</td></tr>`).join('');
+  return `<div class="panel" style="margin-top:16px"><div class="chart-title">First half and first quarter: team start speed</div>
+   <div class="chart-sub">${H.n_games.toLocaleString()} games with quarter scores since ${esc(H.from)}. Baseline: the league's share of the full-game closing total (1H ${pct(H.h1.ratio_last, 1)}, Q1 ${pct(H.q1.ratio_last, 1)}). Model: that share plus each team's start-speed tendency (offence and defence, earlier games only) and the spread. Start speed persists within a season: correlation ${H.persistence_corr?.toFixed(2)} between a team's first and second halves of the season.</div>
+   <div class="kv"><div>Average miss on the 1H total</div><div>${H.h1.mae_fixed.toFixed(2)} fixed share → ${H.h1.mae_team.toFixed(2)} model</div><div>Average miss on the Q1 total</div><div>${H.q1.mae_fixed.toFixed(2)} → ${H.q1.mae_team.toFixed(2)}</div></div>
+   <div class="tbl-wrap"><table class="t"><thead><tr><th>Against a line set at the fixed share</th><th class="n">Bets</th><th class="n">Won</th><th class="n">Return at −110</th><th class="n">95% CI</th></tr></thead><tbody>${tr('1H', H.h1)}${tr('Q1', H.q1)}</tbody></table></div>
+   <p class="small">Verdict: promising but unproven. Those returns assume the book sets half lines with a fixed share; books that adjust for teams would erase part or all of it. Real first-half lines are needed to know.</p></div>`;
+}
 function restHTML(O) {
   const r = O.rest; if (!r) return '';
   const seg = (x) => x ? `${pct(x.actual_sit, 1)} actually sat, ${pct(x.predicted_sit, 1)} predicted (${x.n.toLocaleString()})` : '—';
